@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
+*.egg
+
+# Node
+node_modules/
+dist/
+
+# 环境变量（含敏感信息）
+.env
+backend/.env
+
+# 上传文件
+backend/uploads/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本地设置
+.claude/settings.local.json
+.claude/
+
+# 技能/代理配置
+.agents/
+.trae/
+skills-lock.json
+plan.md
+
+# 测试
+.pytest_cache/
+htmlcov/
+.coverage

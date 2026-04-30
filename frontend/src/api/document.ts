@@ -16,3 +16,7 @@ export function getDocumentsApi(knowledgeBaseId: number) {
 export function deleteDocumentApi(documentId: number) {
   return client.delete(`/documents/${documentId}`)
 }
+
+export function getDocumentChunksApi(documentId: number) {
+  return client.get(`/documents/${documentId}/chunks`)
+}

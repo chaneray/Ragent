@@ -1,5 +1,7 @@
+import json
 import os
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -7,7 +9,7 @@ from app.core.deps import get_db, get_current_user
 from app.core.config import get_settings
 from app.models.user import User
 from app.models.knowledge_base import KnowledgeBase
-from app.models.document import Document, DocumentStatus
+from app.models.document import Document, DocumentStatus, Chunk
 from app.schemas.document import DocumentResponse, DocumentListResponse
 from app.services.document_loader import save_uploaded_file
 from app.services.ingestion import IngestionService
@@ -123,4 +125,68 @@ async def delete_document(
 
     await db.delete(doc)
     await db.commit()
+
+    # 使 BM25 索引失效
+    from app.services.bm25_index import invalidate_index
+    invalidate_index(doc.knowledge_base_id)
+
     return {"message": "文档已删除"}
+
+
+class ChunkItem(BaseModel):
+    id: int
+    chunk_index: int
+    content: str
+    metadata: dict
+
+
+class ChunkListResponse(BaseModel):
+    document_id: int
+    filename: str
+    chunk_count: int
+    chunks: list[ChunkItem]
+
+
+@router.get("/{document_id}/chunks", response_model=ChunkListResponse)
+async def get_document_chunks(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取文档的所有分片内容"""
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.user_id == current_user.id,
+        )
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    chunks_result = await db.execute(
+        select(Chunk).where(Chunk.document_id == document_id).order_by(Chunk.chunk_index)
+    )
+    chunks = list(chunks_result.scalars().all())
+
+    items = []
+    for c in chunks:
+        meta = {}
+        if c.metadata_json:
+            try:
+                meta = json.loads(c.metadata_json)
+            except Exception:
+                pass
+        items.append(ChunkItem(
+            id=c.id,
+            chunk_index=c.chunk_index,
+            content=c.content,
+            metadata=meta,
+        ))
+
+    return ChunkListResponse(
+        document_id=doc.id,
+        filename=doc.original_filename,
+        chunk_count=len(items),
+        chunks=items,
+    )

@@ -7,6 +7,7 @@ from app.models.document import Document, DocumentStatus, Chunk
 from app.models.knowledge_base import KnowledgeBase
 from app.services.document_loader import parse_document, split_documents
 from app.services.embedding_service import get_embedding_model
+from app.services.bm25_index import rebuild_index, invalidate_index
 
 settings = get_settings()
 
@@ -71,7 +72,15 @@ class IngestionService:
                     chunk_index=i,
                 ))
 
-            # 6. 更新统计
+            # 6. 重建 BM25 索引
+            all_chunks_result = await self.db.execute(
+                select(Chunk.id, Chunk.content).where(Chunk.knowledge_base_id == kb.id)
+            )
+            all_rows = all_chunks_result.all()
+            if all_rows:
+                rebuild_index(kb.id, [r[0] for r in all_rows], [r[1] for r in all_rows])
+
+            # 7. 更新统计
             doc.status = DocumentStatus.INDEXED
             doc.chunk_count = len(chunks)
 

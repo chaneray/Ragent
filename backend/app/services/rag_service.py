@@ -1,4 +1,5 @@
 import json
+import re
 from typing import AsyncGenerator
 
 from langchain_core.documents import Document as LCDocument
@@ -12,22 +13,16 @@ from app.services.llm_factory import create_chat_model
 from app.services.embedding_service import get_embedding_model
 from app.services import bm25_index
 from app.services.reranker_service import rerank
+from app.services.prompts import (
+    INTENT_PROMPT,
+    INTENT_CHITCHAT,
+    INTENT_COMPLEX_TASK,
+    DEFAULT_INTENT,
+    build_prompt,
+)
+from app.services.memory_service import MemoryService
 
 settings = get_settings()
-
-RAG_PROMPT_TEMPLATE = """你是一个基于知识库的智能问答助手。请根据以下检索到的资料回答用户问题。
-
-如果检索到的资料不足以回答问题，请如实告知，不要编造信息。
-
-检索到的资料：
-{context}
-
-对话历史：
-{history}
-
-用户问题：{question}
-
-请用中文回答，并引用资料中的相关内容（在引用处标注 [来源: 文档名]）。"""
 
 QUERY_REWRITE_PROMPT = """你是一个查询改写助手。请将用户的口语化问题改写为 2-3 个不同表述方式，使其更适合文档检索。
 
@@ -40,16 +35,39 @@ QUERY_REWRITE_PROMPT = """你是一个查询改写助手。请将用户的口语
 
 
 class RagService:
-    """RAG 检索与生成服务"""
+    """RAG 检索与生成服务（含意图识别 + 记忆注入）"""
 
     def __init__(self, db: AsyncSession):
         self.db = db
         self.llm = create_chat_model()
         self.embeddings = get_embedding_model()
         self.milvus = MilvusClient(host=settings.MILVUS_HOST, port=settings.MILVUS_PORT)
+        self.memory_service = MemoryService(db)
+
+    # ── 意图识别 ──────────────────────────────────────────────
+
+    async def _classify_intent(self, question: str) -> str:
+        """用 LLM 对用户问题做意图分类"""
+        try:
+            prompt = INTENT_PROMPT.format(question=question)
+            response = await self.llm.ainvoke(prompt)
+            content = response.content if hasattr(response, "content") else str(response)
+            # 提取 JSON
+            match = re.search(r'\{[^}]+\}', content)
+            if match:
+                data = json.loads(match.group())
+                intent = data.get("intent", DEFAULT_INTENT)
+                valid_intents = {"knowledge_qa", "chitchat", "summarize", "compare", "complex_task"}
+                if intent in valid_intents:
+                    return intent
+            return DEFAULT_INTENT
+        except Exception:
+            return DEFAULT_INTENT
+
+    # ── 会话历史 ──────────────────────────────────────────────
 
     async def _get_session_history(self, session_id: int, limit: int = 10) -> list[dict]:
-        """获取最近的会话历史"""
+        """获取最近的会话历史（保留兼容）"""
         result = await self.db.execute(
             select(Message)
             .where(Message.session_id == session_id)
@@ -58,6 +76,8 @@ class RagService:
         )
         messages = list(reversed(result.scalars().all()))
         return [{"role": m.role, "content": m.content} for m in messages]
+
+    # ── 查询改写 ──────────────────────────────────────────────
 
     async def _rewrite_query(self, question: str) -> list[str]:
         """用 LLM 改写用户问题，生成多个表述"""
@@ -68,13 +88,24 @@ class RagService:
             queries = [q.strip() for q in content.strip().split("\n") if q.strip()]
             if not queries:
                 return [question]
-            return [question] + queries[:3]  # 原始问题 + 最多3个改写
+            return [question] + queries[:3]
         except Exception:
             return [question]
 
+    # 相关性阈值（rerank_score 低于此值视为不相关）
+    RELEVANCE_THRESHOLD = 0.3
+
+    # ── 检索相关 ──────────────────────────────────────────────
+
     async def _vector_search(self, query: str, kb_ids: list[str], top_k: int = 10) -> list[LCDocument]:
         """单次向量检索"""
-        query_vector = await self.embeddings.aembed_query(query)
+        # 截断过长查询，避免嵌入 API 报错（DashScope text-embedding-v4 限制 3072 token）
+        # 中文 1 字 ≈ 1.5 token，保守限制 1500 字符
+        truncated_query = query[:1500]
+        try:
+            query_vector = await self.embeddings.aembed_query(truncated_query)
+        except Exception:
+            return []
         all_docs = []
 
         for kb_id in kb_ids:
@@ -149,11 +180,7 @@ class RagService:
         k: int = 60,
         top_k: int = 15,
     ) -> list[LCDocument]:
-        """RRF 融合排序
-
-        RRF_score = 1/(k + rank_vector) + 1/(k + rank_bm25)
-        """
-        # 用内容 hash 去重
+        """RRF 融合排序"""
         doc_map: dict[str, LCDocument] = {}
         vector_ranks: dict[str, int] = {}
         bm25_ranks: dict[str, int] = {}
@@ -169,7 +196,6 @@ class RagService:
                 doc_map[key] = doc
             bm25_ranks[key] = rank
 
-        # 计算 RRF 分数
         scored = []
         for key, doc in doc_map.items():
             v_rank = vector_ranks.get(key, len(vector_docs) + 100)
@@ -196,6 +222,8 @@ class RagService:
 
         return self._rrf_fusion(all_vector_docs, all_bm25_docs, top_k=15)
 
+    # ── 格式化 ────────────────────────────────────────────────
+
     def _format_context(self, docs: list[LCDocument]) -> str:
         """格式化检索结果为上下文文本"""
         parts = []
@@ -204,13 +232,7 @@ class RagService:
             parts.append("[%d] (来源: %s)\n%s" % (i + 1, source, doc.page_content))
         return "\n\n".join(parts)
 
-    def _format_history(self, history: list[dict]) -> str:
-        """格式化会话历史"""
-        lines = []
-        for msg in history:
-            role = "用户" if msg["role"] == "user" else "助手"
-            lines.append("%s: %s" % (role, msg["content"]))
-        return "\n".join(lines)
+    # ── 主流程 ────────────────────────────────────────────────
 
     async def chat_stream(
         self,
@@ -218,37 +240,86 @@ class RagService:
         session_id: int,
         kb_ids: list[str],
     ) -> AsyncGenerator[str, None]:
-        """RAG 流式对话"""
-        # 1. 获取会话历史
-        history = await self._get_session_history(session_id)
-        history_text = self._format_history(history)
-
-        # 2. 查询改写
-        queries = await self._rewrite_query(question)
-
-        # 3. 混合检索（BM25 + 向量 + RRF）
-        candidates = await self._hybrid_search(queries, kb_ids)
-
-        # 4. Reranker 精排
-        docs = await rerank(question, candidates, top_k=settings.RETRIEVAL_TOP_K)
-
-        # 5. 构建 Prompt
-        context = self._format_context(docs)
-        prompt = RAG_PROMPT_TEMPLATE.format(
-            context=context,
-            history=history_text,
-            question=question,
+        """RAG 流式对话（含意图识别 + 记忆注入）"""
+        # 获取用户 ID
+        session_result = await self.db.execute(
+            select(Session).where(Session.id == session_id)
         )
+        session = session_result.scalar_one_or_none()
+        user_id = session.user_id if session else 0
 
-        # 6. 流式生成
+        # 1. 意图识别
+        intent = await self._classify_intent(question)
+
+        # 2. 读取记忆
+        memory_context = await self.memory_service.build_memory_context(user_id, session_id)
+
+        # 3. 根据意图路由
+        if intent == INTENT_CHITCHAT:
+            # 闲聊：不走检索，直接生成
+            prompt = build_prompt(
+                intent=intent,
+                question=question,
+                memory_context=memory_context,
+            )
+            docs = []
+        elif intent == INTENT_COMPLEX_TASK:
+            # 复杂任务：路由到 Agent
+            from app.services.agent_service import AgentService
+            agent = AgentService(self.db)
+            full_answer = ""
+            async for token in agent.execute(question, session_id, kb_ids):
+                full_answer += token
+                yield token
+            # 保存消息
+            self.db.add(Message(session_id=session_id, role="user", content=question))
+            self.db.add(Message(session_id=session_id, role="assistant", content=full_answer))
+            await self.db.commit()
+            # 触发记忆更新
+            await self.memory_service.post_conversation_update(session_id, user_id)
+            return
+        else:
+            # knowledge_qa / summarize / compare：走检索
+            queries = await self._rewrite_query(question)
+            candidates = await self._hybrid_search(queries, kb_ids)
+            docs = await rerank(question, candidates, top_k=settings.RETRIEVAL_TOP_K)
+            # 过滤低相关性结果：rerank_score < 阈值则丢弃
+            if docs and any("rerank_score" in d.metadata for d in docs):
+                docs = [d for d in docs if d.metadata.get("rerank_score", 0) >= self.RELEVANCE_THRESHOLD]
+            if not docs:
+                # 检索无相关结果，回退到闲聊模式，让 LLM 用自身知识回答
+                intent = INTENT_CHITCHAT
+                prompt = build_prompt(
+                    intent=intent,
+                    question=question,
+                    memory_context=memory_context,
+                )
+            else:
+                context = self._format_context(docs)
+                prompt = build_prompt(
+                    intent=intent,
+                    question=question,
+                    context=context,
+                    memory_context=memory_context,
+                )
+
+        # 4. 流式生成
         full_answer = ""
-        async for chunk in self.llm.astream(prompt):
-            content = chunk.content if hasattr(chunk, "content") else str(chunk)
-            full_answer += content
-            yield content
+        try:
+            async for chunk in self.llm.astream(prompt):
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                full_answer += content
+                yield content
+        except Exception as e:
+            error_msg = "生成回答时出错: %s" % str(e)[:200]
+            yield error_msg
+            full_answer = error_msg
 
-        # 7. 保存消息到数据库
-        citations = [{"content": d.page_content[:100], "source": d.metadata.get("kb_name", "")} for d in docs[:3]]
+        # 5. 保存消息到数据库
+        citations = [
+            {"content": d.page_content[:100], "source": d.metadata.get("kb_name", "")}
+            for d in docs[:3]
+        ]
         self.db.add(Message(session_id=session_id, role="user", content=question))
         self.db.add(Message(
             session_id=session_id,
@@ -257,3 +328,6 @@ class RagService:
             citations=json.dumps(citations, ensure_ascii=False),
         ))
         await self.db.commit()
+
+        # 6. 对话结束后触发记忆更新
+        await self.memory_service.post_conversation_update(session_id, user_id)

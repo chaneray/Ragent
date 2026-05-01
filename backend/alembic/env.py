@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.models.base import Base
 
 # 导入所有模型以确保它们被 Base 注册
-from app.models import user, knowledge_base, document, session  # noqa: F401
+from app.models import user, knowledge_base, document, session, memory  # noqa: F401
 
 settings = get_settings()
 config = context.config

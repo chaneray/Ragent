@@ -26,8 +26,6 @@ async def chat_stream(
     current_user: User = Depends(get_current_user),
 ):
     """RAG 流式对话（SSE）"""
-    if not req.knowledge_base_ids:
-        raise HTTPException(status_code=400, detail="请至少选择一个知识库")
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="请输入问题")
 
@@ -39,7 +37,7 @@ async def chat_stream(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在或不属于当前用户")
 
-    # 验证知识库归属
+    # 验证知识库归属（闲聊模式可不选知识库）
     for kb_id in req.knowledge_base_ids:
         kb_result = await db.execute(
             select(KnowledgeBase).where(KnowledgeBase.id == int(kb_id), KnowledgeBase.user_id == current_user.id)

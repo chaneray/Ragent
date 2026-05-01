@@ -70,13 +70,14 @@ class TestChatStream:
 
     @pytest.mark.asyncio
     async def test_chat_empty_kb(self, client, auth_headers):
-        """空知识库列表应返回 400"""
+        """空知识库列表允许通过（闲聊模式不需要知识库）"""
         resp = await client.post(
             "/api/v1/chat/stream",
             json={"question": "Hello", "session_id": 1, "knowledge_base_ids": []},
             headers=auth_headers,
         )
-        assert resp.status_code == 400
+        # 空知识库不再返回 400，而是 404（因为 session_id=1 不存在）
+        assert resp.status_code in (200, 404)
 
     @pytest.mark.asyncio
     async def test_chat_invalid_session(self, client, auth_headers):

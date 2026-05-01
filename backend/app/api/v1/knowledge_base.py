@@ -122,4 +122,9 @@ async def delete_knowledge_base(
 
     await db.delete(kb)
     await db.commit()
+
+    # 使 BM25 索引失效
+    from app.services.bm25_index import invalidate_index
+    invalidate_index(kb_id)
+
     return {"message": "知识库已删除"}

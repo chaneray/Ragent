@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # 文档处理
     CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    CHUNK_OVERLAP: int = 150
     MAX_UPLOAD_SIZE_MB: int = 50
 
     # 上传

@@ -3,10 +3,14 @@
 使用阿里云百炼 gte-rerank 模型对检索结果精排。
 """
 
+import logging
+
 import httpx
 from langchain_core.documents import Document as LCDocument
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -57,6 +61,9 @@ async def rerank(
     }
 
     try:
+        logger.info("Rerank 调用: query=%s, docs=%d, top_k=%d", query[:50], len(docs), top_k)
+        for i, doc in enumerate(docs):
+            logger.debug("[Rerank输入] idx=%d, kb=%s, content=%s", i, doc.metadata.get("kb_name", ""), doc.page_content[:200])
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 DASHSCOPE_RERANK_URL,
@@ -77,8 +84,13 @@ async def rerank(
                 metadata={**docs[idx].metadata, "rerank_score": score},
             )
             reranked.append(doc)
+        logger.info("Rerank 完成: 返回 %d 条结果", len(reranked))
+        for i, doc in enumerate(reranked):
+            logger.debug("[Rerank输出] rank=%d, score=%.4f, kb=%s, content=%s",
+                         i, doc.metadata.get("rerank_score", 0), doc.metadata.get("kb_name", ""), doc.page_content[:200])
         return reranked
 
-    except Exception:
+    except Exception as e:
         # 降级：跳过重排，返回原始顺序
+        logger.warning("Rerank 调用失败，降级返回原始顺序: %s", str(e))
         return docs[:top_k]

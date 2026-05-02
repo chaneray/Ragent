@@ -33,6 +33,18 @@ Ragent 是一个基于 FastAPI + LangChain + Vue3 的 RAG 智能对话平台，�
 - 环境变量通过 `.env` 文件注入，不硬编码敏感信息
 - 异常统一使用 FastAPI HTTPException，错误信息用中文
 
+### 日志规范
+- 使用 Python 标准库 `logging`，通过 `logger = logging.getLogger(__name__)` 获取 logger
+- 日志配置统一在 `app/core/logging.py`，通过 `setup_logging()` 初始化
+- **编写代码时必须在关键位置添加日志**，包括但不限于：
+  - 函数入口：记录关键参数（INFO 级别）
+  - 外部调用前后：记录请求参数和返回结果摘要（INFO 级别，详细内容用 DEBUG）
+  - 条件分支：记录走了哪个分支、为什么（INFO 级别）
+  - 异常处理：记录异常信息和降级策略（WARNING/ERROR 级别）
+  - 性能关键点：记录耗时（INFO 级别）
+- 日志级别策略：DEBUG 用于完整内容，INFO 用于关键节点摘要，WARNING 用于可恢复错误，ERROR 用于严重错误
+- 敏感信息（密码、token）不得写入日志
+
 ### 数据库
 - 使用 Alembic 管理数据库迁移
 - 模型继承 SQLAlchemy `Base`，使用 `Mapped` 类型注解

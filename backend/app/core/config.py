@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # 检索
     RETRIEVAL_TOP_K: int = 5
 
+    # 日志
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "text"  # text / json
+
 
 @lru_cache()
 def get_settings() -> Settings:

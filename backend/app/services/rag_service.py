@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import AsyncGenerator
 
@@ -22,6 +23,7 @@ from app.services.prompts import (
 )
 from app.services.memory_service import MemoryService
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 QUERY_REWRITE_PROMPT = """你是一个查询改写助手。请将用户的口语化问题改写为 2-3 个不同表述方式，使其更适合文档检索。
@@ -50,8 +52,10 @@ class RagService:
         """用 LLM 对用户问题做意图分类"""
         try:
             prompt = INTENT_PROMPT.format(question=question)
+            logger.debug("[意图识别] Prompt:\n%s", prompt)
             response = await self.llm.ainvoke(prompt)
             content = response.content if hasattr(response, "content") else str(response)
+            logger.debug("[意图识别] LLM 返回: %s", content[:500])
             # 提取 JSON
             match = re.search(r'\{[^}]+\}', content)
             if match:
@@ -59,9 +63,12 @@ class RagService:
                 intent = data.get("intent", DEFAULT_INTENT)
                 valid_intents = {"knowledge_qa", "chitchat", "summarize", "compare", "complex_task"}
                 if intent in valid_intents:
+                    logger.info("意图识别: intent=%s, question=%s", intent, question[:100])
                     return intent
+            logger.info("意图识别: intent=%s (回退默认), question=%s", DEFAULT_INTENT, question[:100])
             return DEFAULT_INTENT
-        except Exception:
+        except Exception as e:
+            logger.warning("意图识别失败，使用默认意图: %s", str(e))
             return DEFAULT_INTENT
 
     # ── 会话历史 ──────────────────────────────────────────────
@@ -83,13 +90,18 @@ class RagService:
         """用 LLM 改写用户问题，生成多个表述"""
         try:
             prompt = QUERY_REWRITE_PROMPT.format(question=question)
+            logger.debug("[查询改写] Prompt:\n%s", prompt)
             response = await self.llm.ainvoke(prompt)
             content = response.content if hasattr(response, "content") else str(response)
+            logger.debug("[查询改写] LLM 返回: %s", content[:500])
             queries = [q.strip() for q in content.strip().split("\n") if q.strip()]
             if not queries:
                 return [question]
-            return [question] + queries[:3]
-        except Exception:
+            result = [question] + queries[:3]
+            logger.info("查询改写: 原始=%s, 改写结果=%s", question[:50], result)
+            return result
+        except Exception as e:
+            logger.warning("查询改写失败，使用原始问题: %s", str(e))
             return [question]
 
     # 相关性阈值（rerank_score 低于此值视为不相关）
@@ -104,7 +116,8 @@ class RagService:
         truncated_query = query[:1500]
         try:
             query_vector = await self.embeddings.aembed_query(truncated_query)
-        except Exception:
+        except Exception as e:
+            logger.warning("向量嵌入失败: %s", str(e))
             return []
         all_docs = []
 
@@ -135,7 +148,12 @@ class RagService:
                                 "vector_score": hit["distance"],
                             }
                         ))
-            except Exception:
+                logger.info("知识库 [%s] 向量检索完成，返回 %d 条结果", kb.name, len(search_result[0]) if search_result else 0)
+                for i, hit in enumerate(search_result[0] if search_result else []):
+                    logger.debug("[向量检索] kb=%s, rank=%d, score=%.4f, content=%s",
+                                 kb.name, i, hit["distance"], hit["entity"]["text"][:200])
+            except Exception as e:
+                logger.warning("知识库 [%s] 向量检索失败: %s", kb.name, str(e))
                 continue
 
         return all_docs
@@ -149,27 +167,33 @@ class RagService:
 
         for kb_id in kb_ids:
             kb_id_int = int(kb_id)
-            idx = await bm25_index.ensure_index_loaded(self.db, kb_id_int)
-            results = idx.search(query, top_k=top_k)
+            try:
+                idx = await bm25_index.ensure_index_loaded(self.db, kb_id_int)
+                results = idx.search(query, top_k=top_k)
 
-            for chunk_id, score in results:
-                result = await self.db.execute(
-                    select(Chunk.content, Chunk.knowledge_base_id).where(Chunk.id == chunk_id)
-                )
-                row = result.first()
-                if row:
-                    kb_result = await self.db.execute(
-                        select(KnowledgeBase.name).where(KnowledgeBase.id == kb_id_int)
+                for chunk_id, score in results:
+                    result = await self.db.execute(
+                        select(Chunk.content, Chunk.knowledge_base_id).where(Chunk.id == chunk_id)
                     )
-                    kb_name = kb_result.scalar() or "未知"
-                    all_docs.append(LCDocument(
-                        page_content=row[0],
-                        metadata={
-                            "kb_id": kb_id_int,
-                            "kb_name": kb_name,
-                            "bm25_score": score,
-                        }
-                    ))
+                    row = result.first()
+                    if row:
+                        kb_result = await self.db.execute(
+                            select(KnowledgeBase.name).where(KnowledgeBase.id == kb_id_int)
+                        )
+                        kb_name = kb_result.scalar() or "未知"
+                        all_docs.append(LCDocument(
+                            page_content=row[0],
+                            metadata={
+                                "kb_id": kb_id_int,
+                                "kb_name": kb_name,
+                                "bm25_score": score,
+                            }
+                        ))
+                        logger.debug("[BM25检索] kb_id=%d, chunk_id=%d, score=%.4f, content=%s",
+                                     kb_id_int, chunk_id, score, row[0][:200])
+                logger.info("知识库 [%s] BM25 检索完成，返回 %d 条结果", kb_id_int, len(results))
+            except Exception as e:
+                logger.warning("知识库 [%s] BM25 检索失败: %s", kb_id_int, str(e))
 
         return all_docs
 
@@ -206,7 +230,13 @@ class RagService:
             scored.append(LCDocument(page_content=doc.page_content, metadata=metadata))
 
         scored.sort(key=lambda d: d.metadata["rrf_score"], reverse=True)
-        return scored[:top_k]
+        result = scored[:top_k]
+        logger.info("RRF 融合: 向量 %d 条 + BM25 %d 条 -> 融合后 %d 条 (取 top %d)",
+                     len(vector_docs), len(bm25_docs), len(scored), top_k)
+        for i, d in enumerate(result):
+            logger.debug("[RRF融合] rank=%d, rrf_score=%.4f, kb=%s, content=%s",
+                         i, d.metadata.get("rrf_score", 0), d.metadata.get("kb_name", ""), d.page_content[:200])
+        return result
 
     async def _hybrid_search(self, queries: list[str], kb_ids: list[str]) -> list[LCDocument]:
         """混合检索：多查询 × 双路召回 + RRF 融合"""
@@ -253,6 +283,7 @@ class RagService:
 
         # 2. 读取记忆
         memory_context = await self.memory_service.build_memory_context(user_id, session_id)
+        logger.info("记忆上下文构建完成，长度 %d 字符", len(memory_context))
 
         # 3. 根据意图路由
         if intent == INTENT_CHITCHAT:
@@ -283,9 +314,16 @@ class RagService:
             queries = await self._rewrite_query(question)
             candidates = await self._hybrid_search(queries, kb_ids)
             docs = await rerank(question, candidates, top_k=settings.RETRIEVAL_TOP_K)
+            logger.info("Rerank 精排完成，返回 %d 条结果", len(docs))
+            for i, d in enumerate(docs):
+                logger.debug("[Rerank] rank=%d, score=%.4f, kb=%s, content=%s",
+                             i, d.metadata.get("rerank_score", 0), d.metadata.get("kb_name", ""), d.page_content[:200])
             # 过滤低相关性结果：rerank_score < 阈值则丢弃
             if docs and any("rerank_score" in d.metadata for d in docs):
+                before_count = len(docs)
                 docs = [d for d in docs if d.metadata.get("rerank_score", 0) >= self.RELEVANCE_THRESHOLD]
+                if len(docs) < before_count:
+                    logger.info("相关性过滤: %d -> %d 条 (阈值 %.2f)", before_count, len(docs), self.RELEVANCE_THRESHOLD)
             if not docs:
                 # 检索无相关结果，回退到闲聊模式，让 LLM 用自身知识回答
                 intent = INTENT_CHITCHAT
@@ -304,6 +342,8 @@ class RagService:
                 )
 
         # 4. 流式生成
+        logger.info("构建 Prompt 完成，intent=%s, 长度 %d 字符", intent, len(prompt))
+        logger.debug("Prompt 内容: %s", prompt[:500])
         full_answer = ""
         try:
             async for chunk in self.llm.astream(prompt):
@@ -312,8 +352,10 @@ class RagService:
                 yield content
         except Exception as e:
             error_msg = "生成回答时出错: %s" % str(e)[:200]
+            logger.error("LLM 生成失败: %s", str(e))
             yield error_msg
             full_answer = error_msg
+        logger.info("LLM 生成完成，回答长度 %d 字符，前200字: %s", len(full_answer), full_answer[:200])
 
         # 5. 保存消息到数据库
         citations = [

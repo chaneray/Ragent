@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     # 检索
     RETRIEVAL_TOP_K: int = 5
 
+    # 服务端口（避免与主工作树冲突）
+    SERVER_PORT: int = 8001
+
+    # 日志
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "text"  # text / json
+
 
 @lru_cache()
 def get_settings() -> Settings:

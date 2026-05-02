@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +12,7 @@ from app.models.session import Session
 from app.models.knowledge_base import KnowledgeBase
 from app.services.rag_service import RagService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["对话"])
 
 
@@ -26,6 +29,8 @@ async def chat_stream(
     current_user: User = Depends(get_current_user),
 ):
     """RAG 流式对话（SSE）"""
+    logger.info("收到对话请求: user_id=%d, session_id=%d, kb_ids=%s, question=%s",
+                current_user.id, req.session_id, req.knowledge_base_ids, req.question[:100])
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="请输入问题")
 
@@ -57,6 +62,7 @@ async def chat_stream(
                 yield {"event": "token", "data": token}
             yield {"event": "done", "data": ""}
         except Exception as e:
+            logger.exception("SSE 流式对话异常")
             yield {"event": "error", "data": str(e)}
 
     return EventSourceResponse(event_generator())

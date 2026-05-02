@@ -1,8 +1,12 @@
+import logging
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pymilvus import MilvusClient
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 from app.models.document import Document, DocumentStatus, Chunk
 from app.models.knowledge_base import KnowledgeBase
 from app.services.document_loader import parse_document, split_documents
@@ -34,10 +38,12 @@ class IngestionService:
 
         try:
             # 1. 解析文档
+            logger.info("文档入库开始: doc_id=%d, file=%s", document_id, doc.file_path)
             doc.status = DocumentStatus.PARSING
             await self.db.commit()
 
             langchain_docs, _ = parse_document(doc.file_path)
+            logger.info("文档解析完成: doc_id=%d, 页数=%d", document_id, len(langchain_docs))
 
             # 2. 分块
             doc.status = DocumentStatus.CHUNKING
@@ -45,12 +51,14 @@ class IngestionService:
 
             chunks = split_documents(langchain_docs)
             texts = [c.page_content for c in chunks]
+            logger.info("文档分块完成: doc_id=%d, 块数=%d", document_id, len(chunks))
 
             # 3. 向量化
             doc.status = DocumentStatus.EMBEDDING
             await self.db.commit()
 
             vectors = await self.embeddings.aembed_documents(texts)
+            logger.info("向量化完成: doc_id=%d, 向量数=%d", document_id, len(vectors))
 
             # 4. 写入 Milvus
             milvus_data = [
@@ -101,9 +109,11 @@ class IngestionService:
             kb.chunk_count = chunk_count_result.scalar() or 0
 
             await self.db.commit()
+            logger.info("文档入库完成: doc_id=%d, chunks=%d, kb=%s", document_id, len(chunks), kb.name)
 
         except Exception as e:
             doc.status = DocumentStatus.FAILED
             doc.error_message = str(e)
+            logger.error("文档入库失败: doc_id=%d, error=%s", document_id, str(e))
             await self.db.commit()
             raise

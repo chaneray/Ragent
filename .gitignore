@@ -18,6 +18,9 @@ backend/.env
 # 上传文件
 backend/uploads/
 
+# 日志文件
+backend/logs/
+
 # IDE
 .vscode/
 .idea/

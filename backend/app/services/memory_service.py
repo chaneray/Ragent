@@ -7,7 +7,10 @@
 """
 
 import json
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,10 +146,14 @@ class MemoryService:
         # LLM 生成摘要
         try:
             prompt = SUMMARY_PROMPT.format(conversation=conversation)
+            logger.debug("[摘要生成] Prompt:\n%s", prompt[:500])
             response = await self.llm.ainvoke(prompt)
             summary = response.content if hasattr(response, "content") else str(response)
+            logger.debug("[摘要生成] LLM 返回: %s", summary[:500])
             summary = summary.strip()
-        except Exception:
+            logger.info("会话摘要生成完成: session_id=%d, 长度=%d", session_id, len(summary))
+        except Exception as e:
+            logger.error("会话摘要生成失败: session_id=%d, error=%s", session_id, str(e))
             return None
 
         # 写入 Level 2 记忆
@@ -195,6 +202,8 @@ class MemoryService:
         if len(level2_list) < 5:
             return None
 
+        logger.info("Level3 合并触发: user_id=%d, l2_count=%d", user_id, len(level2_list))
+
         # 取最近 5 条 Level 2
         to_merge = level2_list[:5]
         summaries = "\n---\n".join(m.content for m in to_merge)
@@ -209,8 +218,10 @@ class MemoryService:
                 existing_profile=existing_profile,
                 summaries=summaries,
             )
+            logger.debug("[画像合并] Prompt:\n%s", prompt[:500])
             response = await self.llm.ainvoke(prompt)
             profile = response.content if hasattr(response, "content") else str(response)
+            logger.debug("[画像合并] LLM 返回: %s", profile[:500])
             profile = profile.strip()
         except Exception:
             return None
@@ -247,12 +258,19 @@ class MemoryService:
         l3 = await self.get_level3_memory(user_id)
         if l3:
             parts.append("[用户画像]\n%s" % l3.content)
+            logger.debug("L3 用户画像: %s", l3.content)
+        else:
+            logger.debug("L3 用户画像: 无")
 
         # Level 2: 最近的主题归纳
         l2_list = await self.get_level2_memories(user_id, limit=3)
         if l2_list:
             l2_text = "\n".join("- %s" % m.content for m in l2_list)
             parts.append("[近期讨论主题]\n%s" % l2_text)
+            for i, m in enumerate(l2_list):
+                logger.debug("L2 会话摘要[%d]: %s", i, m.content)
+        else:
+            logger.debug("L2 会话摘要: 无")
 
         # Level 1: 短期记忆
         l1 = await self.get_short_term_memory(session_id)
@@ -262,7 +280,13 @@ class MemoryService:
                 for m in l1
             )
             parts.append("[近期对话]\n%s" % l1_text)
+            for m in l1:
+                logger.debug("L1 短期记忆 [%s]: %s", m["role"], m["content"][:200])
+        else:
+            logger.debug("L1 短期记忆: 无")
 
+        logger.info("记忆查询: user_id=%d, l3=%s, l2=%d条, l1=%d条",
+                     user_id, "有" if l3 else "无", len(l2_list), len(l1))
         return "\n\n".join(parts) if parts else ""
 
     # ── 对话结束后的记忆更新流程 ────────────────────────────────

@@ -12,9 +12,12 @@
 """
 
 import json
+import logging
 import re
 import time
 from typing import AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -196,6 +199,7 @@ class AgentService:
         kb_ids: list[str],
     ) -> AsyncGenerator[str, None]:
         """执行 Agent 循环，流式输出最终答案"""
+        logger.info("Agent 模式启动: question=%s, kb_ids=%s", question[:100], kb_ids)
         start_time = time.time()
         accumulated_info = ""
 
@@ -211,17 +215,20 @@ class AgentService:
                 accumulated_info=accumulated_info if accumulated_info else "暂无",
             )
             full_prompt = AGENT_SYSTEM_PROMPT + "\n\n" + iteration_prompt
+            logger.debug("[Agent 迭代 %d] Prompt:\n%s", iteration + 1, full_prompt[:1000])
 
             # LLM 决策
             try:
                 response = await self.llm.ainvoke(full_prompt)
                 content = response.content if hasattr(response, "content") else str(response)
+                logger.debug("[Agent 迭代 %d] LLM 返回: %s", iteration + 1, content[:500])
             except Exception as e:
                 yield "\n\n[Agent 调用 LLM 失败: %s]" % str(e)
                 break
 
             # 解析动作
             action, action_input = self._parse_action(content)
+            logger.info("Agent 迭代 %d: action=%s, input=%s", iteration + 1, action, action_input[:100] if action_input else "")
 
             if action == "finish":
                 # 最终答案
@@ -240,6 +247,7 @@ class AgentService:
 
             # 执行工具
             tool_result = await self._execute_tool(action, action_input, kb_ids)
+            logger.info("Agent 工具执行完成: tool=%s, result_preview=%s", action, tool_result[:200])
             accumulated_info += "\n\n[第%d步 %s(%s)]\n%s" % (
                 iteration + 1, action, action_input, tool_result
             )

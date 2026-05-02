@@ -1,6 +1,10 @@
+import logging
+
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -15,6 +19,8 @@ def create_chat_model() -> BaseChatModel:
 
     if not api_key or "sk-your" in api_key:
         raise ValueError("未配置有效的 API Key，请在 .env 中设置 OPENAI_API_KEY")
+
+    logger.info("创建 LLM: provider=%s, model=%s", provider, model)
 
     if provider == "dashscope":
         # 阿里云百炼（DashScope OpenAI 兼容接口）

@@ -46,6 +46,7 @@ export interface Message {
   content: string
   citations: string | null
   created_at: string
+  isError?: boolean
 }
 
 // API 统一返回

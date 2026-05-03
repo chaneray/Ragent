@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "text"  # text / json
 
+    # 服务端口（避免与主工作树冲突）
+    SERVER_PORT: int = 8001
+
 
 @lru_cache()
 def get_settings() -> Settings:

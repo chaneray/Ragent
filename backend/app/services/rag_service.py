@@ -22,6 +22,7 @@ from app.services.prompts import (
     build_prompt,
 )
 from app.services.memory_service import MemoryService
+from app.services.intent_service import IntentService
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -45,6 +46,7 @@ class RagService:
         self.embeddings = get_embedding_model()
         self.milvus = MilvusClient(host=settings.MILVUS_HOST, port=settings.MILVUS_PORT)
         self.memory_service = MemoryService(db)
+        self.intent_service = IntentService(self.llm)
 
     # ── 意图识别 ──────────────────────────────────────────────
 
@@ -278,14 +280,35 @@ class RagService:
         session = session_result.scalar_one_or_none()
         user_id = session.user_id if session else 0
 
-        # 1. 意图识别
-        intent = await self._classify_intent(question)
+        # 1. 意图识别（新版，支持置信度 + 槽位提取）
+        intent_result = await self.intent_service.classify(question, session_id, self.db)
+        intent = intent_result.intent
 
-        # 2. 读取记忆
+        # 2. 处理澄清
+        if intent_result.needs_clarification and intent_result.confidence < 0.7:
+            logger.info("触发意图澄清: confidence=%.2f, question=%s", intent_result.confidence, question[:50])
+            clarification_data = {
+                "event": "clarification",
+                "data": {
+                    "question": intent_result.clarification_question,
+                    "options": [
+                        "查询知识库",
+                        "闲聊",
+                        "总结归纳",
+                        "对比分析",
+                        "复杂任务",
+                    ],
+                    "original_question": question,
+                },
+            }
+            yield json.dumps(clarification_data, ensure_ascii=False)
+            return
+
+        # 3. 读取记忆
         memory_context = await self.memory_service.build_memory_context(user_id, session_id)
         logger.info("记忆上下文构建完成，长度 %d 字符", len(memory_context))
 
-        # 3. 根据意图路由
+        # 4. 根据意图路由
         if intent == INTENT_CHITCHAT:
             # 闲聊：不走检索，直接生成
             prompt = build_prompt(
@@ -341,7 +364,7 @@ class RagService:
                     memory_context=memory_context,
                 )
 
-        # 4. 流式生成
+        # 5. 流式生成
         logger.info("构建 Prompt 完成，intent=%s, 长度 %d 字符", intent, len(prompt))
         logger.debug("Prompt 内容: %s", prompt[:500])
         full_answer = ""
@@ -357,7 +380,7 @@ class RagService:
             full_answer = error_msg
         logger.info("LLM 生成完成，回答长度 %d 字符，前200字: %s", len(full_answer), full_answer[:200])
 
-        # 5. 保存消息到数据库
+        # 6. 保存消息到数据库
         citations = [
             {"content": d.page_content[:100], "source": d.metadata.get("kb_name", "")}
             for d in docs[:3]
@@ -371,5 +394,5 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 6. 对话结束后触发记忆更新
+        # 7. 对话结束后触发记忆更新
         await self.memory_service.post_conversation_update(session_id, user_id)

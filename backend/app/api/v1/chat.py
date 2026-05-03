@@ -1,3 +1,4 @@
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -59,6 +60,19 @@ async def chat_stream(
                 session_id=req.session_id,
                 kb_ids=req.knowledge_base_ids,
             ):
+                # 检测澄清事件（JSON 格式）
+                if token.startswith('{"event":'):
+                    try:
+                        clarification_data = json.loads(token)
+                        if clarification_data.get("event") == "clarification":
+                            yield {
+                                "event": "clarification",
+                                "data": json.dumps(clarification_data["data"], ensure_ascii=False),
+                            }
+                            continue
+                    except json.JSONDecodeError:
+                        pass
+                # 普通 token
                 yield {"event": "token", "data": token}
             yield {"event": "done", "data": ""}
         except Exception as e:

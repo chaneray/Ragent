@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { createSessionApi, getSessionsApi, getSessionApi, deleteSessionApi } from '@/api/chat'
+import { useSSE } from '@/composables/useSSE'
 import type { Session, Message } from '@/types'
 
 const API_BASE = '/api/v1'
@@ -14,6 +15,34 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Message[]>([])
   const streaming = ref(false)
   const currentAnswer = ref('')
+
+  const sse = useSSE({ maxRetries: 3, retryDelay: 1000 })
+
+  // ── 持久化：流式过程中保存 currentAnswer 到 sessionStorage ──
+
+  watch(currentAnswer, (val) => {
+    if (streaming.value && currentSessionId.value) {
+      sessionStorage.setItem(`streaming_${currentSessionId.value}`, val)
+    }
+  })
+
+  function clearStreamingCache(sessionId: number) {
+    sessionStorage.removeItem(`streaming_${sessionId}`)
+  }
+
+  function restoreStreamingAnswer(sessionId: number) {
+    const saved = sessionStorage.getItem(`streaming_${sessionId}`)
+    if (saved) {
+      messages.value.push({
+        id: nextTempId(), session_id: sessionId, role: 'assistant',
+        content: saved + '\n\n（回答可能不完整，已从缓存恢复）',
+        citations: null, created_at: '',
+      })
+      sessionStorage.removeItem(`streaming_${sessionId}`)
+    }
+  }
+
+  // ── 会话 CRUD ──
 
   async function fetchSessions() {
     const res = await getSessionsApi()
@@ -30,6 +59,7 @@ export const useChatStore = defineStore('chat', () => {
     currentSessionId.value = sessionId
     const res = await getSessionApi(sessionId)
     messages.value = res.data.items || []
+    restoreStreamingAnswer(sessionId)
   }
 
   async function deleteSession(sessionId: number) {
@@ -38,8 +68,11 @@ export const useChatStore = defineStore('chat', () => {
       currentSessionId.value = null
       messages.value = []
     }
+    clearStreamingCache(sessionId)
     await fetchSessions()
   }
+
+  // ── 发送消息 ──
 
   async function sendMessage(question: string, kbIds: string[]) {
     if (!currentSessionId.value) {
@@ -47,6 +80,7 @@ export const useChatStore = defineStore('chat', () => {
       currentSessionId.value = session.id
     }
 
+    // 插入用户消息
     messages.value.push({
       id: nextTempId(), session_id: currentSessionId.value, role: 'user',
       content: question, citations: null, created_at: '',
@@ -56,49 +90,40 @@ export const useChatStore = defineStore('chat', () => {
     currentAnswer.value = ''
 
     const token = localStorage.getItem('token')
-    const response = await fetch(`${API_BASE}/chat/stream`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, session_id: currentSessionId.value, knowledge_base_ids: kbIds }),
-    })
+    const sessionId = currentSessionId.value
 
-    const reader = response.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      // 统一换行符：sse-starlette 3.x 使用 \r\n，需先归一化为 \n
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-
-      const blocks = buffer.split('\n\n')
-      buffer = blocks.pop() || ''
-
-      for (const block of blocks) {
-        const lines = block.split('\n')
-        let eventType = ''
-        let data = ''
-        for (const line of lines) {
-          if (line.startsWith('event: ')) eventType = line.slice(7)
-          else if (line.startsWith('data: ')) data = line.slice(6)
-        }
-
-        if (eventType === 'token') {
+    await sse.connect(
+      `${API_BASE}/chat/stream`,
+      { question, session_id: sessionId, knowledge_base_ids: kbIds },
+      { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      {
+        onToken(data) {
           currentAnswer.value += data
-        } else if (eventType === 'done') {
+        },
+        onDone() {
           if (currentAnswer.value) {
             messages.value.push({
-              id: nextTempId(), session_id: currentSessionId.value!, role: 'assistant',
+              id: nextTempId(), session_id: sessionId, role: 'assistant',
               content: currentAnswer.value, citations: null, created_at: '',
             })
-            currentAnswer.value = ''
           }
-        } else if (eventType === 'error') {
-          console.error('对话错误:', data)
-        }
-      }
-    }
+          currentAnswer.value = ''
+          clearStreamingCache(sessionId)
+        },
+        onError(message) {
+          messages.value.push({
+            id: nextTempId(), session_id: sessionId, role: 'assistant',
+            content: `对话出错：${message}`, citations: null, created_at: '',
+            isError: true,
+          })
+          currentAnswer.value = ''
+          clearStreamingCache(sessionId)
+        },
+        onReconnecting(attempt) {
+          console.log(`SSE 重连中，第 ${attempt} 次...`)
+        },
+      },
+    )
 
     streaming.value = false
   }

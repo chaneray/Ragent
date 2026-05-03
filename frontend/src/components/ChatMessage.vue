@@ -6,6 +6,8 @@ const props = defineProps<{
   role: 'user' | 'assistant'
   content: string
   citations?: string | null
+  streaming?: boolean
+  isError?: boolean
 }>()
 
 const isUser = computed(() => props.role === 'user')
@@ -21,8 +23,15 @@ function renderMarkdown(text: string): string {
     <div class="avatar" :class="isUser ? 'user-avatar' : 'ai-avatar'">
       {{ isUser ? 'U' : 'AI' }}
     </div>
-    <div class="bubble" :class="isUser ? 'user-bubble' : 'assistant-bubble'">
-      <div v-if="isUser" class="text">{{ content }}</div>
+    <div class="bubble" :class="{
+      'user-bubble': isUser,
+      'assistant-bubble': !isUser,
+      'error-bubble': isError,
+    }">
+      <!-- 流式中：纯文本 + 闪烁光标 -->
+      <div v-if="streaming" class="text streaming">{{ content }}</div>
+      <!-- 完成后：Markdown 渲染 -->
+      <div v-else-if="isUser" class="text">{{ content }}</div>
       <div v-else class="markdown-body" v-html="renderMarkdown(content)"></div>
     </div>
   </div>
@@ -50,7 +59,18 @@ function renderMarkdown(text: string): string {
 }
 .user-bubble { background: #ecf5ff; color: #303133; }
 .assistant-bubble { background: #fff; border: 1px solid #e4e7ed; color: #303133; }
+.error-bubble { background: #fef0f0; border-color: #f56c6c; color: #f56c6c; }
 .text { white-space: pre-wrap; word-break: break-word; }
+
+/* 流式闪烁光标 */
+.streaming::after {
+  content: '▌';
+  animation: blink 1s step-end infinite;
+  color: #409eff;
+  margin-left: 1px;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
 .markdown-body { word-break: break-word; }
 .markdown-body :deep(p) { margin: 0 0 8px; }
 .markdown-body :deep(pre) { background: #f5f7fa; padding: 12px; border-radius: 8px; overflow-x: auto; }

@@ -22,6 +22,7 @@ from app.services.prompts import (
     build_prompt,
 )
 from app.services.memory_service import MemoryService
+from app.services.intent_service import IntentService
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -45,6 +46,7 @@ class RagService:
         self.embeddings = get_embedding_model()
         self.milvus = MilvusClient(host=settings.MILVUS_HOST, port=settings.MILVUS_PORT)
         self.memory_service = MemoryService(db)
+        self.intent_service = IntentService(self.llm)
 
     # ── 意图识别 ──────────────────────────────────────────────
 
@@ -269,8 +271,16 @@ class RagService:
         question: str,
         session_id: int,
         kb_ids: list[str],
+        intent: str = None,
     ) -> AsyncGenerator[str, None]:
-        """RAG 流式对话（含意图识别 + 记忆注入）"""
+        """RAG 流式对话（含意图识别 + 记忆注入）
+
+        Args:
+            question: 用户问题
+            session_id: 会话 ID
+            kb_ids: 知识库 ID 列表
+            intent: 可选：用户指定的意图（用于澄清后跳过意图识别）
+        """
         # 获取用户 ID
         session_result = await self.db.execute(
             select(Session).where(Session.id == session_id)
@@ -278,14 +288,48 @@ class RagService:
         session = session_result.scalar_one_or_none()
         user_id = session.user_id if session else 0
 
-        # 1. 意图识别
-        intent = await self._classify_intent(question)
+        # 1. 意图识别（如果用户指定了意图，跳过意图识别）
+        if intent:
+            logger.info("使用用户指定的意图: %s（跳过意图识别）", intent)
+            intent_result = None
+        else:
+            intent_result = await self.intent_service.classify(question, session_id, self.db)
+            intent = intent_result.intent
 
-        # 2. 读取记忆
+            # 2. 处理澄清
+            if intent_result.needs_clarification and intent_result.confidence < 0.7:
+                logger.info("触发意图澄清: confidence=%.2f, question=%s", intent_result.confidence, question[:50])
+                # 使用 LLM 返回的澄清选项，如果没有则使用默认选项
+                options = intent_result.clarification_options if intent_result.clarification_options else [
+                    "查询知识库",
+                    "闲聊",
+                    "总结归纳",
+                    "对比分析",
+                    "复杂任务",
+                ]
+                clarification_data = {
+                    "event": "clarification",
+                    "data": {
+                        "question": intent_result.clarification_question or "请明确您的问题意图",
+                        "options": options,
+                        "original_question": question,
+                    },
+                }
+                yield json.dumps(clarification_data, ensure_ascii=False)
+                return
+
+        # 3. 读取记忆
         memory_context = await self.memory_service.build_memory_context(user_id, session_id)
-        logger.info("记忆上下文构建完成，长度 %d 字符", len(memory_context))
+        logger.info("=" * 60)
+        logger.info("【记忆系统】用户ID=%d, 会话ID=%d", user_id, session_id)
+        logger.info("记忆上下文长度: %d 字符", len(memory_context))
+        if memory_context:
+            logger.info("记忆内容:\n%s", memory_context)
+        else:
+            logger.info("记忆内容: 空")
+        logger.info("=" * 60)
 
-        # 3. 根据意图路由
+        # 4. 根据意图路由
         if intent == INTENT_CHITCHAT:
             # 闲聊：不走检索，直接生成
             prompt = build_prompt(
@@ -312,18 +356,22 @@ class RagService:
         else:
             # knowledge_qa / summarize / compare：走检索
             queries = await self._rewrite_query(question)
+            logger.info("=" * 60)
+            logger.info("【RAG 检索】查询改写结果: %s", queries)
             candidates = await self._hybrid_search(queries, kb_ids)
+            logger.info("【RAG 检索】混合检索召回 %d 条候选", len(candidates))
             docs = await rerank(question, candidates, top_k=settings.RETRIEVAL_TOP_K)
-            logger.info("Rerank 精排完成，返回 %d 条结果", len(docs))
+            logger.info("【RAG 检索】Rerank 精排完成，返回 %d 条结果", len(docs))
             for i, d in enumerate(docs):
-                logger.debug("[Rerank] rank=%d, score=%.4f, kb=%s, content=%s",
+                logger.info("[Rerank] rank=%d, score=%.4f, kb=%s, content=%s",
                              i, d.metadata.get("rerank_score", 0), d.metadata.get("kb_name", ""), d.page_content[:200])
             # 过滤低相关性结果：rerank_score < 阈值则丢弃
             if docs and any("rerank_score" in d.metadata for d in docs):
                 before_count = len(docs)
                 docs = [d for d in docs if d.metadata.get("rerank_score", 0) >= self.RELEVANCE_THRESHOLD]
                 if len(docs) < before_count:
-                    logger.info("相关性过滤: %d -> %d 条 (阈值 %.2f)", before_count, len(docs), self.RELEVANCE_THRESHOLD)
+                    logger.info("【RAG 检索】相关性过滤: %d -> %d 条 (阈值 %.2f)", before_count, len(docs), self.RELEVANCE_THRESHOLD)
+            logger.info("=" * 60)
             if not docs:
                 # 检索无相关结果，回退到闲聊模式，让 LLM 用自身知识回答
                 intent = INTENT_CHITCHAT
@@ -341,9 +389,11 @@ class RagService:
                     memory_context=memory_context,
                 )
 
-        # 4. 流式生成
-        logger.info("构建 Prompt 完成，intent=%s, 长度 %d 字符", intent, len(prompt))
-        logger.debug("Prompt 内容: %s", prompt[:500])
+        # 5. 流式生成
+        logger.info("=" * 60)
+        logger.info("【系统提示词】intent=%s, 长度 %d 字符", intent, len(prompt))
+        logger.info("完整 Prompt:\n%s", prompt)
+        logger.info("=" * 60)
         full_answer = ""
         try:
             async for chunk in self.llm.astream(prompt):
@@ -355,9 +405,12 @@ class RagService:
             logger.error("LLM 生成失败: %s", str(e))
             yield error_msg
             full_answer = error_msg
-        logger.info("LLM 生成完成，回答长度 %d 字符，前200字: %s", len(full_answer), full_answer[:200])
+        logger.info("=" * 60)
+        logger.info("【LLM 回复】长度 %d 字符", len(full_answer))
+        logger.info("完整回复:\n%s", full_answer)
+        logger.info("=" * 60)
 
-        # 5. 保存消息到数据库
+        # 6. 保存消息到数据库
         citations = [
             {"content": d.page_content[:100], "source": d.metadata.get("kb_name", "")}
             for d in docs[:3]
@@ -371,5 +424,5 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 6. 对话结束后触发记忆更新
+        # 7. 对话结束后触发记忆更新
         await self.memory_service.post_conversation_update(session_id, user_id)

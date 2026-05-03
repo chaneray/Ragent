@@ -5,6 +5,7 @@ export interface SSECallbacks {
   onDone: () => void
   onError: (message: string) => void
   onReconnecting?: (attempt: number) => void
+  onClarification?: (data: string) => void
 }
 
 export interface SSEOptions {
@@ -120,6 +121,8 @@ export function useSSE(options?: SSEOptions) {
           } else if (eventType === 'error') {
             callbacks.onError(data || '对话出错')
             return false
+          } else if (eventType === 'clarification') {
+            callbacks.onClarification?.(data)
           }
         }
       }

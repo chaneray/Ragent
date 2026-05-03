@@ -2,7 +2,7 @@
 import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowDown } from '@element-plus/icons-vue'
+import { ArrowDown, QuestionFilled } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
 import { useKnowledgeBaseStore } from '@/stores/knowledgeBase'
 import ChatMessage from '@/components/ChatMessage.vue'
@@ -15,6 +15,7 @@ const kbStore = useKnowledgeBaseStore()
 const messagesEnd = ref<HTMLElement | null>(null)
 const messagesArea = ref<HTMLElement | null>(null)
 const isUserScrolledUp = ref(false)
+const selectedKbIds = ref<string[]>([])
 
 const kbOptions = computed(() =>
   kbStore.list.map(kb => ({ id: kb.id, name: kb.name }))
@@ -33,6 +34,7 @@ const displayedMessages = computed(() => {
 })
 
 async function handleSend(question: string, kbIds: string[]) {
+  selectedKbIds.value = kbIds
   try {
     await chatStore.sendMessage(question, kbIds)
   } catch (err) {
@@ -40,16 +42,21 @@ async function handleSend(question: string, kbIds: string[]) {
   }
 }
 
+async function handleClarification(option: string) {
+  try {
+    await chatStore.answerClarification(option, selectedKbIds.value)
+  } catch (err) {
+    ElMessage.error('澄清回答失败')
+  }
+}
+
 async function handleRetry(errorMsg: { id: number; content: string }) {
-  // 找到错误消息之前的最后一条用户消息
   const msgs = chatStore.messages
   const errorIdx = msgs.findIndex(m => m.id === errorMsg.id)
   if (errorIdx < 0) return
   const lastUserMsg = [...msgs].slice(0, errorIdx).reverse().find(m => m.role === 'user')
   if (!lastUserMsg) return
-  // 删除错误消息
   chatStore.messages.splice(errorIdx, 1)
-  // 重新发送
   try {
     await chatStore.sendMessage(lastUserMsg.content, [])
   } catch (err) {
@@ -76,25 +83,21 @@ async function scrollToBottom(smooth = true) {
   messagesEnd.value?.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant' })
 }
 
-// 监听用户滚动：距离底部 > 100px 视为"手动上滚"
 function onScroll() {
   const el = messagesArea.value
   if (!el) return
   isUserScrolledUp.value = el.scrollHeight - el.scrollTop - el.clientHeight > 100
 }
 
-// 流式输出时：只有用户没上滚才自动滚底
 watch(() => chatStore.currentAnswer, () => {
   if (!isUserScrolledUp.value) scrollToBottom()
 })
 
-// 切换会话 / 加载消息后：强制滚底
 watch(() => chatStore.messages.length, () => {
   isUserScrolledUp.value = false
   scrollToBottom(false)
 })
 
-// "跳转最新"按钮
 function scrollToLatest() {
   isUserScrolledUp.value = false
   scrollToBottom()
@@ -106,7 +109,6 @@ onMounted(async () => {
   if (sid) {
     await chatStore.selectSession(Number(sid))
   }
-  // 默认滚到底部
   scrollToBottom(false)
 })
 </script>
@@ -143,7 +145,7 @@ onMounted(async () => {
       <div
         ref="messagesArea"
         class="messages-area"
-        v-if="displayedMessages.length"
+        v-if="displayedMessages.length || chatStore.clarification"
         @scroll="onScroll"
       >
         <ChatMessage
@@ -156,6 +158,28 @@ onMounted(async () => {
           :is-error="msg.isError"
           @retry="handleRetry(msg)"
         />
+
+        <!-- 澄清问题 -->
+        <div v-if="chatStore.clarification" class="clarification-card">
+          <div class="clarification-header">
+            <el-icon><QuestionFilled /></el-icon>
+            <span>需要澄清</span>
+          </div>
+          <div class="clarification-question">{{ chatStore.clarification.question }}</div>
+          <div class="clarification-options">
+            <el-button
+              v-for="option in chatStore.clarification.options"
+              :key="option"
+              type="primary"
+              plain
+              size="small"
+              @click="handleClarification(option)"
+            >
+              {{ option }}
+            </el-button>
+          </div>
+        </div>
+
         <div ref="messagesEnd" />
 
         <!-- 跳转最新按钮 -->
@@ -263,6 +287,38 @@ onMounted(async () => {
   align-items: center;
 }
 
+/* 澄清卡片 */
+.clarification-card {
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 16px 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.clarification-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #e6a23c;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+.clarification-question {
+  color: #303133;
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+
+.clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* 跳转最新按钮 */
 .scroll-to-bottom {
   position: sticky;
@@ -289,7 +345,6 @@ onMounted(async () => {
   border-color: #409eff;
 }
 
-/* 淡入淡出动画 */
 .fade-enter-active, .fade-leave-active {
   transition: opacity 0.2s ease;
 }

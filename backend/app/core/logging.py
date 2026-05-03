@@ -5,6 +5,7 @@
 
 import logging
 import sys
+import io
 
 
 class JsonFormatter(logging.Formatter):
@@ -34,6 +35,11 @@ def setup_logging(level: str = "INFO", fmt: str = "text") -> None:
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    # Windows 下强制 stdout 使用 UTF-8 编码
+    if sys.platform == "win32":
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
     handler = logging.StreamHandler(sys.stdout)
 

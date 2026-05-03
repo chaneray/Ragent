@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
+from typing import Optional
 
 from app.core.deps import get_db, get_current_user
 from app.models.user import User
@@ -21,6 +22,7 @@ class ChatRequest(BaseModel):
     question: str
     session_id: int
     knowledge_base_ids: list[str]
+    intent: Optional[str] = None  # 可选：用户指定的意图（用于澄清后跳过意图识别）
 
 
 @router.post("/stream")
@@ -30,8 +32,8 @@ async def chat_stream(
     current_user: User = Depends(get_current_user),
 ):
     """RAG 流式对话（SSE）"""
-    logger.info("收到对话请求: user_id=%d, session_id=%d, kb_ids=%s, question=%s",
-                current_user.id, req.session_id, req.knowledge_base_ids, req.question[:100])
+    logger.info("收到对话请求: user_id=%d, session_id=%d, kb_ids=%s, intent=%s, question=%s",
+                current_user.id, req.session_id, req.knowledge_base_ids, req.intent, req.question[:100])
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="请输入问题")
 
@@ -59,6 +61,7 @@ async def chat_stream(
                 question=req.question,
                 session_id=req.session_id,
                 kb_ids=req.knowledge_base_ids,
+                intent=req.intent,
             ):
                 # 检测澄清事件（JSON 格式）
                 if token.startswith('{"event":'):

@@ -43,3 +43,9 @@ plan.md
 .pytest_cache/
 htmlcov/
 .coverage
+
+# 设计文档
+doc/
+
+# 日志
+log/

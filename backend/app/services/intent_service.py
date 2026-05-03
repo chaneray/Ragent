@@ -5,8 +5,10 @@
 - 置信度评估
 - 槽位提取
 - 上下文感知
+- 规则引擎预处理（防注入）
 """
 
+import re
 import logging
 
 from sqlalchemy import select
@@ -23,6 +25,75 @@ VALID_INTENTS = {"knowledge_qa", "chitchat", "summarize", "compare", "complex_ta
 
 # 置信度阈值
 CONFIDENCE_THRESHOLD = 0.7
+
+# 注入模式检测正则
+INJECTION_PATTERNS = [
+    # 直接设置置信度
+    r"置信度\s*[设选]\s*[为成]\s*\d",
+    r"confidence\s*[设选]\s*[为成]\s*\d",
+    r"[设选]\s*[为成]\s*置信度",
+    r"[设选]\s*[为成]\s*confidence",
+    # 试图控制输出
+    r"返回\s*[特指]\s*[定]",
+    r"输出\s*[特指]\s*[定]",
+    r"请\s*[将把]\s*.*\s*[设选]\s*[为成]",
+    r"你需要\s*[设选]\s*[为成]",
+    r"你应该\s*[设选]\s*[为成]",
+    r"要求.*[设选]\s*[为成]\s*\d",
+    # 暗示/强调置信度高低
+    r"置信度\s*非常",
+    r"置信度\s*很高",
+    r"置信度\s*很高",
+    r"置信度\s*极[高低]",
+    r"confidence\s*very\s*high",
+    r"置信度\s*\d",
+    # 试图直接指定意图类别
+    r"这是一个.*查询.*知识库",
+    r"这是一个.*知识库.*提问",
+    r"这是一个.*闲聊",
+    r"这是一个.*总结",
+    r"这是一个.*对比",
+    r"这是.*意图\s*是",
+    # 提示注入标记
+    r"ignore\s*previous",
+    r"忽略.*之前.*指令",
+    r"忽略.*上面.*规则",
+    r"你是一个.*而不是",
+]
+
+# 意图关键词规则
+INTENT_RULES = {
+    "chitchat": [
+        r"你好|hello|hi|嗨|hey",
+        r"什么是\w+|是什么|怎么理解",
+        r"谢谢|感谢|多谢",
+        r"再见|拜拜|bye",
+        r"推荐|建议|告诉我",
+        r"聊[聊天]|闲聊",
+    ],
+    "knowledge_qa": [
+        r"怎么|如何|怎样",
+        r"为什么|原因|原理",
+        r"配置|设置|安装",
+        r"查询|查找|搜索",
+        r"文档|资料|手册",
+    ],
+    "summarize": [
+        r"总结|归纳|概括",
+        r"摘要|提炼|梳理",
+    ],
+    "compare": [
+        r"对比|比较|对照",
+        r"区别|差异|不同",
+        r"优缺点|优势|劣势",
+    ],
+    "complex_task": [
+        r"分析.*并.*",
+        r"帮我.*然后.*",
+        r"首先.*然后.*最后",
+        r"多步|步骤|流程",
+    ],
+}
 
 
 class IntentService:
@@ -53,29 +124,106 @@ class IntentService:
         Returns:
             IntentResult: 意图识别结果
         """
-        logger.info("开始意图识别: question=%s, session_id=%d", question[:50], session_id)
+        logger.info("=" * 60)
+        logger.info("【意图识别】开始: question=%s, session_id=%d", question[:50], session_id)
+
+        # 0. 规则引擎预处理：检测注入模式，直接返回，不经过验证和澄清
+        if self._detect_injection(question):
+            logger.warning("【意图识别】检测到注入模式，使用规则引擎判断")
+            result = self._rule_based_classify(question)
+            logger.info("【意图识别】规则引擎结果: intent=%s, confidence=%.2f", result.intent, result.confidence)
+            logger.info("=" * 60)
+            return result
 
         # 1. 构建上下文
         history = await self._build_history_context(session_id, db)
-        logger.debug("对话历史: %s", history[:200])
+        logger.info("【意图识别】对话历史:\n%s", history)
 
         # 2. 调用 LLM
         prompt = INTENT_CLASSIFY_PROMPT.format(history=history, question=question)
+        logger.info("【意图识别】完整 Prompt:\n%s", prompt)
         try:
             result = await self.structured_llm.ainvoke(prompt)
-            logger.info(
-                "意图识别完成: intent=%s, confidence=%.2f, needs_clarification=%s",
-                result.intent,
-                result.confidence,
-                result.needs_clarification,
-            )
+            logger.info("【意图识别】LLM 返回结果:")
+            logger.info("  intent: %s", result.intent)
+            logger.info("  confidence: %.2f", result.confidence)
+            logger.info("  entities: %s", result.entities)
+            logger.info("  action: %s", result.action)
+            logger.info("  conditions: %s", result.conditions)
+            logger.info("  needs_clarification: %s", result.needs_clarification)
+            logger.info("  clarification_question: %s", result.clarification_question)
+            logger.info("  clarification_options: %s", result.clarification_options)
         except Exception as e:
-            logger.error("意图识别 LLM 调用失败: %s", str(e))
+            logger.error("【意图识别】LLM 调用失败: %s", str(e))
             return self._get_default_result()
 
         # 3. 验证和修正
-        validated = self._validate_result(result)
+        validated = self._validate_result(result, question)
+        logger.info("【意图识别】最终结果: intent=%s, confidence=%.2f", validated.intent, validated.confidence)
+        logger.info("=" * 60)
         return validated
+
+    def _detect_injection(self, question: str) -> bool:
+        """检测用户问题是否包含注入模式
+
+        Args:
+            question: 用户问题
+
+        Returns:
+            bool: 是否检测到注入
+        """
+        for pattern in INJECTION_PATTERNS:
+            match = re.search(pattern, question, re.IGNORECASE)
+            if match:
+                logger.warning("【注入检测】命中模式: '%s', 匹配内容: '%s', question=%s",
+                             pattern, match.group(), question[:80])
+                return True
+        logger.info("【注入检测】未检测到注入模式, question=%s", question[:80])
+        return False
+
+    def _rule_based_classify(self, question: str) -> IntentResult:
+        """使用规则引擎进行意图分类
+
+        Args:
+            question: 用户问题
+
+        Returns:
+            IntentResult: 意图识别结果
+        """
+        question_lower = question.lower()
+
+        # 计算每个意图的匹配分数
+        scores = {}
+        for intent, patterns in INTENT_RULES.items():
+            score = 0
+            for pattern in patterns:
+                if re.search(pattern, question_lower):
+                    score += 1
+            if score > 0:
+                scores[intent] = score
+
+        # 选择得分最高的意图
+        if scores:
+            best_intent = max(scores, key=scores.get)
+            # 置信度根据匹配分数计算
+            confidence = min(0.6, 0.3 + scores[best_intent] * 0.1)
+            logger.info("【规则引擎】匹配结果: %s, 分数: %s, 置信度: %.2f", best_intent, scores, confidence)
+        else:
+            # 没有匹配到任何规则，默认为 chitchat
+            best_intent = "chitchat"
+            confidence = 0.5
+            logger.info("【规则引擎】无匹配规则，默认: chitchat, 置信度: %.2f", confidence)
+
+        return IntentResult(
+            intent=best_intent,
+            confidence=confidence,
+            entities=[],
+            action="rule_based",
+            conditions=["检测到注入模式，使用规则引擎"],
+            needs_clarification=False,
+            clarification_question="",
+            clarification_options=[],
+        )
 
     async def _build_history_context(
         self,
@@ -117,11 +265,12 @@ class IntentService:
 
         return "\n".join(history_lines)
 
-    def _validate_result(self, result: IntentResult) -> IntentResult:
+    def _validate_result(self, result: IntentResult, question: str = "") -> IntentResult:
         """验证和修正 LLM 输出
 
         Args:
             result: LLM 返回的结果
+            question: 用户原始问题
 
         Returns:
             IntentResult: 验证后的结果

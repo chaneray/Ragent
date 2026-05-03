@@ -258,19 +258,20 @@ class MemoryService:
         l3 = await self.get_level3_memory(user_id)
         if l3:
             parts.append("[用户画像]\n%s" % l3.content)
-            logger.debug("L3 用户画像: %s", l3.content)
+            logger.info("【L3 用户画像】\n%s", l3.content)
         else:
-            logger.debug("L3 用户画像: 无")
+            logger.info("【L3 用户画像】无")
 
         # Level 2: 最近的主题归纳
         l2_list = await self.get_level2_memories(user_id, limit=3)
         if l2_list:
             l2_text = "\n".join("- %s" % m.content for m in l2_list)
             parts.append("[近期讨论主题]\n%s" % l2_text)
+            logger.info("【L2 会话摘要】%d 条:", len(l2_list))
             for i, m in enumerate(l2_list):
-                logger.debug("L2 会话摘要[%d]: %s", i, m.content)
+                logger.info("  L2[%d]: %s", i, m.content)
         else:
-            logger.debug("L2 会话摘要: 无")
+            logger.info("【L2 会话摘要】无")
 
         # Level 1: 短期记忆
         l1 = await self.get_short_term_memory(session_id)
@@ -280,12 +281,13 @@ class MemoryService:
                 for m in l1
             )
             parts.append("[近期对话]\n%s" % l1_text)
+            logger.info("【L1 短期记忆】%d 条:", len(l1))
             for m in l1:
-                logger.debug("L1 短期记忆 [%s]: %s", m["role"], m["content"][:200])
+                logger.info("  L1[%s]: %s", m["role"], m["content"][:200])
         else:
-            logger.debug("L1 短期记忆: 无")
+            logger.info("【L1 短期记忆】无")
 
-        logger.info("记忆查询: user_id=%d, l3=%s, l2=%d条, l1=%d条",
+        logger.info("【记忆汇总】user_id=%d, L3=%s, L2=%d条, L1=%d条",
                      user_id, "有" if l3 else "无", len(l2_list), len(l1))
         return "\n\n".join(parts) if parts else ""
 

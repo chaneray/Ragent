@@ -35,3 +35,7 @@ class IntentResult(BaseModel):
         description="澄清问题",
         default="",
     )
+    clarification_options: list[str] = Field(
+        description="澄清选项列表，例如 ['闲聊', '对比分析']",
+        default_factory=list,
+    )

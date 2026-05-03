@@ -15,6 +15,7 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<Message[]>([])
   const streaming = ref(false)
   const currentAnswer = ref('')
+  const clarification = ref<{ question: string; options: string[]; originalQuestion: string } | null>(null)
 
   const sse = useSSE({ maxRetries: 3, retryDelay: 1000 })
 
@@ -74,13 +75,12 @@ export const useChatStore = defineStore('chat', () => {
 
   // ── 发送消息 ──
 
-  async function sendMessage(question: string, kbIds: string[]) {
+  async function sendMessage(question: string, kbIds: string[], userIntent?: string) {
     if (!currentSessionId.value) {
       const session = await createSession()
       currentSessionId.value = session.id
     }
 
-    // 插入用户消息
     messages.value.push({
       id: nextTempId(), session_id: currentSessionId.value, role: 'user',
       content: question, citations: null, created_at: '',
@@ -88,17 +88,32 @@ export const useChatStore = defineStore('chat', () => {
 
     streaming.value = true
     currentAnswer.value = ''
+    clarification.value = null
 
     const token = localStorage.getItem('token')
     const sessionId = currentSessionId.value
+    const body: any = { question, session_id: sessionId, knowledge_base_ids: kbIds }
+    if (userIntent) body.intent = userIntent
 
     await sse.connect(
       `${API_BASE}/chat/stream`,
-      { question, session_id: sessionId, knowledge_base_ids: kbIds },
+      body,
       { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       {
         onToken(data) {
           currentAnswer.value += data
+        },
+        onClarification(data) {
+          try {
+            const clarificationData = JSON.parse(data)
+            clarification.value = {
+              question: clarificationData.question,
+              options: clarificationData.options || [],
+              originalQuestion: clarificationData.original_question || question,
+            }
+          } catch (e) {
+            console.error('解析澄清数据失败:', e)
+          }
         },
         onDone() {
           if (currentAnswer.value) {
@@ -128,8 +143,32 @@ export const useChatStore = defineStore('chat', () => {
     streaming.value = false
   }
 
+  // ── 澄清响应 ──
+
+  async function answerClarification(option: string, kbIds: string[]) {
+    if (!clarification.value) return
+    const originalQuestion = clarification.value.originalQuestion
+    clarification.value = null
+
+    const intentMap: Record<string, string> = {
+      '查询知识库': 'knowledge_qa',
+      '闲聊': 'chitchat',
+      '总结归纳': 'summarize',
+      '对比分析': 'compare',
+      '复杂任务': 'complex_task',
+      'knowledge_qa': 'knowledge_qa',
+      'chitchat': 'chitchat',
+      'summarize': 'summarize',
+      'compare': 'compare',
+      'complex_task': 'complex_task',
+    }
+    const userIntent = intentMap[option] || 'knowledge_qa'
+
+    await sendMessage(originalQuestion, kbIds, userIntent)
+  }
+
   return {
-    sessions, currentSessionId, messages, streaming, currentAnswer,
-    fetchSessions, createSession, selectSession, deleteSession, sendMessage,
+    sessions, currentSessionId, messages, streaming, currentAnswer, clarification,
+    fetchSessions, createSession, selectSession, deleteSession, sendMessage, answerClarification,
   }
 })

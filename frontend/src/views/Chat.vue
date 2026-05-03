@@ -40,6 +40,23 @@ async function handleSend(question: string, kbIds: string[]) {
   }
 }
 
+async function handleRetry(errorMsg: { id: number; content: string }) {
+  // 找到错误消息之前的最后一条用户消息
+  const msgs = chatStore.messages
+  const errorIdx = msgs.findIndex(m => m.id === errorMsg.id)
+  if (errorIdx < 0) return
+  const lastUserMsg = [...msgs].slice(0, errorIdx).reverse().find(m => m.role === 'user')
+  if (!lastUserMsg) return
+  // 删除错误消息
+  chatStore.messages.splice(errorIdx, 1)
+  // 重新发送
+  try {
+    await chatStore.sendMessage(lastUserMsg.content, [])
+  } catch (err) {
+    ElMessage.error('重试失败')
+  }
+}
+
 async function handleNewSession() {
   await chatStore.createSession()
 }
@@ -137,6 +154,7 @@ onMounted(async () => {
           :citations="msg.citations"
           :streaming="msg.id === -9999"
           :is-error="msg.isError"
+          @retry="handleRetry(msg)"
         />
         <div ref="messagesEnd" />
 

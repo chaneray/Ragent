@@ -12,6 +12,9 @@ export interface SSEOptions {
   retryDelay?: number
 }
 
+/** 读取超时：超过此时间未收到数据，视为断线 */
+const READ_TIMEOUT_MS = 30_000
+
 export function useSSE(options?: SSEOptions) {
   const maxRetries = options?.maxRetries ?? 3
   const baseDelay = options?.retryDelay ?? 1000
@@ -22,15 +25,17 @@ export function useSSE(options?: SSEOptions) {
 
   /**
    * 解析 SSE 块，提取事件类型和数据
+   * SSE 协议：多行 data: 用换行符连接
    */
   function parseSSEBlock(block: string): { eventType: string; data: string } {
     let eventType = ''
-    let data = ''
+    const dataLines: string[] = []
     for (const line of block.split('\n')) {
       if (line.startsWith('event: ')) eventType = line.slice(7)
-      else if (line.startsWith('data: ')) data = line.slice(6)
+      else if (line.startsWith('data: ')) dataLines.push(line.slice(6))
+      else if (line === 'data:') dataLines.push('')
     }
-    return { eventType, data }
+    return { eventType, data: dataLines.join('\n') }
   }
 
   /**
@@ -73,11 +78,30 @@ export function useSSE(options?: SSEOptions) {
     const decoder = new TextDecoder()
     let buffer = ''
     let receivedDone = false
+    let lastDataTime = Date.now()
+
+    // 带超时的读取：防止服务端断开后 read() 永久挂起
+    function readWithTimeout(): Promise<ReadableStreamReadResult<Uint8Array>> {
+      return Promise.race([
+        reader.read(),
+        new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+          const elapsed = Date.now() - lastDataTime
+          const remaining = READ_TIMEOUT_MS - elapsed
+          const timer = setTimeout(
+            () => reject(new Error(`读取超时（${READ_TIMEOUT_MS / 1000}s 未收到数据）`)),
+            Math.max(remaining, 1000),
+          )
+          // abort 时清除定时器
+          abortController?.signal.addEventListener('abort', () => clearTimeout(timer))
+        }),
+      ])
+    }
 
     try {
       while (true) {
-        const { done, value } = await reader.read()
+        const { done, value } = await readWithTimeout()
         if (done) break
+        lastDataTime = Date.now()
 
         // 统一换行符：sse-starlette 3.x 使用 \r\n
         buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')

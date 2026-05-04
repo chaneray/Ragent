@@ -56,7 +56,35 @@ BUDGET_PROFILES = {
 
 ---
 
-## 2. 结构化摘要格式
+## 2. L1 消息配对校验
+
+### 当前问题
+
+L1 滑动窗口从最近消息往回取，按 token 预算截断。如果最后一条恰好是 assistant 回复，而它的 user 问题被截掉了，就会出现"没有提问直接冒出 AI 回复"的情况，导致 LLM 困惑。
+
+### 设计
+
+滑动窗口截断后做配对校验，确保不会出现孤立的 assistant 消息：
+
+```python
+async def get_short_term_memory(self, session_id, token_budget=2000):
+    # ... 原有滑动窗口逻辑 ...
+    
+    # 配对校验：第一条必须是 user 消息
+    while window and window[0]["role"] != "user":
+        window.pop(0)
+    
+    return window
+```
+
+**设计要点：**
+- 截断后如果第一条是 assistant，说明它的 user 问题被截掉了，丢弃该 assistant 消息
+- 如果最后一条是 user（没有对应的 assistant），保留它——可能是用户刚发送的、尚未回复的问题
+- 这保证 LLM 看到的上下文始终是完整的问答对
+
+---
+
+## 3. 结构化摘要格式
 
 ### 当前问题
 
@@ -111,7 +139,7 @@ L2 存储纯摘要，采用精简的 JSON 结构化格式。
 
 ---
 
-## 3. L3 用户画像生成
+## 4. L3 用户画像生成
 
 **L3 生成方式**：当 L2 记录数达到阈值时，由 LLM 合并最近 N 条 L2 摘要生成用户画像。
 
@@ -140,7 +168,7 @@ L2 存储纯摘要，采用精简的 JSON 结构化格式。
 
 ---
 
-## 4. 触发阈值优化
+## 5. 触发阈值优化
 
 ### 当前问题
 
@@ -164,7 +192,7 @@ L2 存储纯摘要，采用精简的 JSON 结构化格式。
 
 ---
 
-## 5. 数据清理
+## 6. 数据清理
 
 ### 当前问题
 
@@ -214,7 +242,7 @@ async def delete_session(...):
 
 ---
 
-## 6. 异步记忆更新
+## 7. 异步记忆更新
 
 ### 当前问题
 
@@ -260,10 +288,12 @@ asyncio.create_task(_safe_post_update(memory_service, session_id, user_id))
 
 - [ ] 对话结束后 SSE 响应立即关闭，记忆更新在后台执行
 - [ ] 不同意图的对话使用不同的 token 预算
+- [ ] L1 滑动窗口截断后不会出现孤立的 assistant 消息（配对校验）
 - [ ] L2 摘要为 JSON 格式，包含 topic/key_points/pending
 - [ ] L2 关联 session_id，属于会话级记忆
 - [ ] L2 支持增量摘要（消息增长到 20/40/60 条时补充生成）
 - [ ] L3 关联 user_id，属于用户级全局记忆
 - [ ] L3 在 3 条 L2 后即生成用户画像
+- [ ] L3 的 source_sessions 不超过 20 个
 - [ ] 删除 Session 时 Message 和 L2 记忆被级联删除，L3 不受影响
 - [ ] 定期清理 API 能清除孤立数据

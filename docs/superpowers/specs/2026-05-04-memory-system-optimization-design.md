@@ -9,6 +9,16 @@
 3. 触发阈值不够合理（L2 过早触发，L3 过晚触发）
 4. Session 删除时没有级联清理关联数据
 5. `post_conversation_update` 同步阻塞 SSE 响应关闭
+6. L2 每个会话只生成一次，后续对话不会更新摘要
+7. L2/L3 的归属关系不清晰（L2 应属于会话，L3 应属于用户）
+
+### 三层记忆归属关系
+
+| 层级 | 定位 | 归属 | 存储 | 生成方式 |
+|------|------|------|------|---------|
+| **L1** | 短期记忆：当前会话的近期对话原文 | 会话级（session_id） | 不存储，每次从 message 表实时读取 | 无需生成 |
+| **L2** | 中期记忆：单个会话的结构化摘要 | 会话级（session_id） | user_memory 表，通过 session_id 关联 | LLM 生成 |
+| **L3** | 长期记忆：跨会话的用户画像 | 用户级（user_id） | user_memory 表，通过 user_id 关联 | LLM 合并生成 |
 
 ## 优化方案：轻量增强
 
@@ -55,7 +65,27 @@ BUDGET_PROFILES = {
 
 ### 设计
 
-L2 存储纯摘要，采用精简的 JSON 结构化格式：
+L2 存储纯摘要，采用精简的 JSON 结构化格式。
+
+**L2 生成方式**：对话结束后由 LLM 生成。将当前会话的全部消息拼接为文本，输入 LLM 生成结构化摘要。
+
+**L2 提示词：**
+```
+请将以下对话总结为结构化摘要，严格按 JSON 格式输出：
+要求：
+1. 提取核心信息，忽略寒暄
+2. 保留具体的技术术语、数值、结论
+3. topic 不超过 30 字
+4. key_points 最多 3 条，每条不超过 50 字
+5. pending 最多 2 条，如果没有未解决的问题，输出空数组 []
+
+对话内容：
+{conversation}
+
+请直接输出 JSON，不要加标题或前缀。
+```
+
+**摘要格式：**
 
 ```json
 {
@@ -81,7 +111,35 @@ L2 存储纯摘要，采用精简的 JSON 结构化格式：
 
 ---
 
-## 3. 触发阈值优化
+## 3. L3 用户画像生成
+
+**L3 生成方式**：当 L2 记录数达到阈值时，由 LLM 合并最近 N 条 L2 摘要生成用户画像。
+
+**L3 提示词：**
+```
+请根据以下多条会话摘要，生成一份用户画像。
+要求：
+1. 提取用户的角色、技术栈、偏好、常见话题
+2. 用简洁的中文表述，控制在 100 字以内
+3. 如果已有旧画像，请合并更新，保留仍有效的信息
+
+已有画像：
+{existing_profile}
+
+近期会话摘要：
+{summaries}
+
+请直接输出更新后的用户画像，不要加标题或前缀。
+```
+
+**设计要点：**
+- L3 是用户级全局记忆，关联 `user_id`
+- L3 是原地更新（覆盖旧内容），不保留历史版本
+- L3 读取时取该用户唯一的 L3 记录
+
+---
+
+## 4. 触发阈值优化
 
 ### 当前问题
 
@@ -105,7 +163,7 @@ L2 存储纯摘要，采用精简的 JSON 结构化格式：
 
 ---
 
-## 4. 数据清理
+## 5. 数据清理
 
 ### 当前问题
 
@@ -114,43 +172,48 @@ L2 存储纯摘要，采用精简的 JSON 结构化格式：
 
 ### 设计
 
+由于 L2 现在关联 `session_id`，数据清理逻辑大幅简化。
+
 **即时级联删除（SQLAlchemy ORM）：**
 
 ```python
 # models/session.py
 class Session(Base):
     messages = relationship("Message", cascade="all, delete-orphan", ...)
+    # L2 记忆通过 session_id 关联，删除 Session 时级联删除
 ```
 
-删除 Session 时主动清理 UserMemory 中的 `source_sessions` 引用：
+删除 Session 时的清理流程：
+1. 级联删除所有 Message（cascade="all, delete-orphan"）
+2. 级联删除该 Session 的所有 L2 记忆（通过 session_id 查询并删除）
+3. L3 用户画像不受影响（属于用户，不属于会话）
 
 ```python
 # api/v1/session.py - delete_session
 async def delete_session(...):
+    # 1. 删除 Session（级联删除 Message）
     await db.delete(session)
-    # 清理 UserMemory 中的 source_sessions 引用
-    memories = await db.execute(
-        select(UserMemory).where(UserMemory.user_id == user.id)
+    # 2. 删除该 Session 的 L2 记忆
+    level2_memories = await db.execute(
+        select(UserMemory)
+        .where(UserMemory.level == 2, UserMemory.session_id == session_id)
     )
-    for mem in memories.scalars():
-        sources = json.loads(mem.source_sessions or "[]")
-        if session_id in sources:
-            sources.remove(session_id)
-            mem.source_sessions = json.dumps(sources)
+    for mem in level2_memories.scalars():
+        await db.delete(mem)
     await db.commit()
 ```
 
 **定期清理孤立数据（API 端点）：**
 
 新增 `POST /api/v1/admin/cleanup` 端点（需 JWT 认证），清理当前用户的：
-- `source_sessions` 引用了不存在的 session_id 的 UserMemory
+- session_id 引用了不存在的 session 的 L2 记忆
 - 超过 90 天未更新的 Level 2 记忆（可配置）
 
 手动触发，不需要定时任务。
 
 ---
 
-## 5. 异步记忆更新
+## 6. 异步记忆更新
 
 ### 当前问题
 
@@ -185,20 +248,21 @@ asyncio.create_task(_safe_post_update(memory_service, session_id, user_id))
 
 | 文件 | 改动 |
 |------|------|
-| `backend/app/services/memory_service.py` | 动态预算、结构化摘要、触发阈值、增量摘要 |
+| `backend/app/services/memory_service.py` | 动态预算、结构化摘要、触发阈值、增量摘要、L2/L3 提示词 |
 | `backend/app/models/session.py` | 新增 `last_summarized_message_id` 字段 |
-| `backend/app/models/memory.py` | content 字段存储 JSON |
+| `backend/app/models/memory.py` | 新增 `session_id` 字段（L2 关联会话）、content 字段存储 JSON |
 | `backend/app/services/rag_service.py` | 异步记忆更新、传入意图到 build_memory_context |
-| `backend/app/services/prompts.py` | 更新摘要生成 prompt |
-| `backend/app/api/v1/session.py` | 级联删除逻辑 |
-| `backend/alembic/versions/` | 新增迁移文件 |
+| `backend/app/api/v1/session.py` | 级联删除 L2 记忆 |
+| `backend/alembic/versions/` | 新增迁移文件（user_memory 添加 session_id） |
 
 ## 验证清单
 
 - [ ] 对话结束后 SSE 响应立即关闭，记忆更新在后台执行
 - [ ] 不同意图的对话使用不同的 token 预算
 - [ ] L2 摘要为 JSON 格式，包含 topic/key_points/pending
-- [ ] L2 阈值提升到 20 条消息后才触发
+- [ ] L2 关联 session_id，属于会话级记忆
+- [ ] L2 支持增量摘要（消息增长到 20/40/60 条时补充生成）
+- [ ] L3 关联 user_id，属于用户级全局记忆
 - [ ] L3 在 3 条 L2 后即生成用户画像
-- [ ] 删除 Session 时 Message 和 UserMemory 引用被清理
+- [ ] 删除 Session 时 Message 和 L2 记忆被级联删除，L3 不受影响
 - [ ] 定期清理 API 能清除孤立数据

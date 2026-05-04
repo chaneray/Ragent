@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = ""
     DEEPSEEK_API_KEY: str = ""
+    DASHSCOPE_API_KEY: str = ""
     OLLAMA_BASE_URL: str = "http://localhost:11434"
 
     # Embedding（支持 openai / dashscope / fake）
@@ -39,14 +40,14 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
 
     # 检索
-    RETRIEVAL_TOP_K: int = 5
+    RETRIEVAL_TOP_K: int = 3
 
     # 日志
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "text"  # text / json
 
     # 服务端口（避免与主工作树冲突）
-    SERVER_PORT: int = 8001
+    SERVER_PORT: int = 8002
 
 
 @lru_cache()

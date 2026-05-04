@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -26,6 +27,14 @@ from app.services.intent_service import IntentService
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+async def _safe_post_update(memory_service: MemoryService, session_id: int, user_id: int) -> None:
+    """后台安全执行记忆更新，捕获所有异常避免影响主流程"""
+    try:
+        await memory_service.post_conversation_update(session_id, user_id)
+    except Exception as e:
+        logger.error("后台记忆更新失败: session_id=%d, user_id=%d, error=%s", session_id, user_id, str(e))
 
 QUERY_REWRITE_PROMPT = """你是一个查询改写助手。请将用户的口语化问题改写为 2-3 个不同表述方式，使其更适合文档检索。
 
@@ -318,8 +327,8 @@ class RagService:
                 yield json.dumps(clarification_data, ensure_ascii=False)
                 return
 
-        # 3. 读取记忆
-        memory_context = await self.memory_service.build_memory_context(user_id, session_id)
+        # 3. 读取记忆（传入意图以动态分配 token 预算）
+        memory_context = await self.memory_service.build_memory_context(user_id, session_id, intent=intent)
         logger.info("=" * 60)
         logger.info("【记忆系统】用户ID=%d, 会话ID=%d", user_id, session_id)
         logger.info("记忆上下文长度: %d 字符", len(memory_context))
@@ -350,8 +359,8 @@ class RagService:
             self.db.add(Message(session_id=session_id, role="user", content=question))
             self.db.add(Message(session_id=session_id, role="assistant", content=full_answer))
             await self.db.commit()
-            # 触发记忆更新
-            await self.memory_service.post_conversation_update(session_id, user_id)
+            # 触发记忆更新（后台异步执行，不阻塞响应）
+            asyncio.create_task(_safe_post_update(self.memory_service, session_id, user_id))
             return
         else:
             # knowledge_qa / summarize / compare：走检索
@@ -424,5 +433,5 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 7. 对话结束后触发记忆更新
-        await self.memory_service.post_conversation_update(session_id, user_id)
+        # 7. 对话结束后触发记忆更新（后台异步执行，不阻塞响应）
+        asyncio.create_task(_safe_post_update(self.memory_service, session_id, user_id))

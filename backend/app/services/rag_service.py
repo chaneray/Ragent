@@ -48,6 +48,14 @@ class RagService:
         self.memory_service = MemoryService(db)
         self.intent_service = IntentService(self.llm)
 
+    async def _do_memory_update(self, session_id: int, user_id: int) -> None:
+        """对话结束后触发记忆更新（使用请求内的 db session）"""
+        try:
+            await self.memory_service.post_conversation_update(session_id, user_id)
+            await self.db.commit()
+        except Exception as e:
+            logger.error("记忆更新失败: session_id=%d, user_id=%d, error=%s", session_id, user_id, str(e))
+
     # ── 意图识别 ──────────────────────────────────────────────
 
     async def _classify_intent(self, question: str) -> str:
@@ -80,7 +88,7 @@ class RagService:
         result = await self.db.execute(
             select(Message)
             .where(Message.session_id == session_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.id.desc())
             .limit(limit)
         )
         messages = list(reversed(result.scalars().all()))
@@ -318,8 +326,8 @@ class RagService:
                 yield json.dumps(clarification_data, ensure_ascii=False)
                 return
 
-        # 3. 读取记忆
-        memory_context = await self.memory_service.build_memory_context(user_id, session_id)
+        # 3. 读取记忆（传入意图以动态分配 token 预算）
+        memory_context = await self.memory_service.build_memory_context(user_id, session_id, intent=intent)
         logger.info("=" * 60)
         logger.info("【记忆系统】用户ID=%d, 会话ID=%d", user_id, session_id)
         logger.info("记忆上下文长度: %d 字符", len(memory_context))
@@ -350,8 +358,8 @@ class RagService:
             self.db.add(Message(session_id=session_id, role="user", content=question))
             self.db.add(Message(session_id=session_id, role="assistant", content=full_answer))
             await self.db.commit()
-            # 触发记忆更新
-            await self.memory_service.post_conversation_update(session_id, user_id)
+            # 触发记忆更新（SSE 已发完，直接 await 不影响客户端）
+            await self._do_memory_update(session_id, user_id)
             return
         else:
             # knowledge_qa / summarize / compare：走检索
@@ -424,5 +432,5 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 7. 对话结束后触发记忆更新
-        await self.memory_service.post_conversation_update(session_id, user_id)
+        # 7. 对话结束后触发记忆更新（SSE 已发完，直接 await 不影响客户端）
+        await self._do_memory_update(session_id, user_id)

@@ -8,6 +8,8 @@ from typing import Optional
 from app.core.deps import get_db, get_current_user
 from app.models.user import User
 from app.models.session import Session, Message
+from app.models.memory import UserMemory
+from app.services.memory_service import MemoryService
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["会话"])
 
@@ -91,7 +93,7 @@ async def get_session_messages(
     result = await db.execute(
         select(Message)
         .where(Message.session_id == session_id)
-        .order_by(Message.created_at)
+        .order_by(Message.id)
     )
     items = list(result.scalars().all())
     return MessageListResponse(items=items)
@@ -103,7 +105,7 @@ async def delete_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """删除会话"""
+    """删除会话（级联删除 Message 和 L2 记忆）"""
     result = await db.execute(
         select(Session).where(Session.id == session_id, Session.user_id == current_user.id)
     )
@@ -111,6 +113,26 @@ async def delete_session(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
+    # 1. 删除该 Session 的 L2 记忆
+    l2_result = await db.execute(
+        select(UserMemory)
+        .where(UserMemory.level == 2, UserMemory.session_id == session_id)
+    )
+    for mem in l2_result.scalars():
+        await db.delete(mem)
+
+    # 2. 删除 Session（级联删除 Message）
     await db.delete(session)
     await db.commit()
     return {"message": "会话已删除"}
+
+
+@router.post("/cleanup")
+async def cleanup_orphan_memories(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """清理孤立的 L2 记忆（session_id 引用了不存在的 session）"""
+    memory_service = MemoryService(db)
+    cleaned = await memory_service.cleanup_orphan_memories(current_user.id)
+    return {"message": "清理完成", "cleaned": cleaned}

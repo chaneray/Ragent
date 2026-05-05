@@ -245,7 +245,7 @@ class IntentService:
             result = await db.execute(
                 select(Message)
                 .where(Message.session_id == session_id)
-                .order_by(Message.created_at.desc())
+                .order_by(Message.id.desc())
                 .limit(limit * 2)
             )
             messages = list(reversed(result.scalars().all()))
@@ -256,8 +256,13 @@ class IntentService:
         if not messages:
             return "无历史对话"
 
+        # 配对校验：第一条必须是 user 消息，避免孤立的 assistant 回复
+        selected = messages[-limit * 2:]
+        while selected and selected[0].role != "user":
+            selected = selected[1:]
+
         history_lines = []
-        for msg in messages[-limit * 2:]:
+        for msg in selected:
             role = "用户" if msg.role == "user" else "助手"
             # 截断过长消息，避免 token 溢出
             content = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content

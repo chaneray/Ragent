@@ -73,18 +73,13 @@ export const useChatStore = defineStore('chat', () => {
     await fetchSessions()
   }
 
-  // ── 发送消息 ──
+  // ── SSE 请求（内部函数，不添加用户消息） ──
 
-  async function sendMessage(question: string, kbIds: string[], userIntent?: string) {
+  async function _sendRequest(question: string, kbIds: string[], userIntent?: string) {
     if (!currentSessionId.value) {
       const session = await createSession()
       currentSessionId.value = session.id
     }
-
-    messages.value.push({
-      id: nextTempId(), session_id: currentSessionId.value, role: 'user',
-      content: question, citations: null, created_at: '',
-    })
 
     streaming.value = true
     currentAnswer.value = ''
@@ -143,7 +138,23 @@ export const useChatStore = defineStore('chat', () => {
     streaming.value = false
   }
 
-  // ── 澄清响应 ──
+  // ── 发送消息（添加用户消息 + 请求） ──
+
+  async function sendMessage(question: string, kbIds: string[], userIntent?: string) {
+    if (!currentSessionId.value) {
+      const session = await createSession()
+      currentSessionId.value = session.id
+    }
+
+    messages.value.push({
+      id: nextTempId(), session_id: currentSessionId.value, role: 'user',
+      content: question, citations: null, created_at: '',
+    })
+
+    await _sendRequest(question, kbIds, userIntent)
+  }
+
+  // ── 澄清响应（不重复添加用户消息） ──
 
   async function answerClarification(option: string, kbIds: string[]) {
     if (!clarification.value) return
@@ -164,7 +175,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     const userIntent = intentMap[option] || 'knowledge_qa'
 
-    await sendMessage(originalQuestion, kbIds, userIntent)
+    await _sendRequest(originalQuestion, kbIds, userIntent)
   }
 
   return {

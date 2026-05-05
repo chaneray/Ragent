@@ -14,13 +14,18 @@ settings = get_settings()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
+def get_session_factory():
+    """获取数据库 session 工厂（用于后台任务创建独立 session）"""
+    from app.main import AsyncSessionLocal
+    return AsyncSessionLocal
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """数据库会话依赖注入（由 main.py 中的 engine 提供）"""
     from app.main import AsyncSessionLocal
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             logger.warning("数据库事务回滚")

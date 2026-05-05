@@ -4,8 +4,11 @@
 """
 
 import logging
+import logging.handlers
 import sys
 import io
+import os
+from pathlib import Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -25,6 +28,27 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(log_data, ensure_ascii=False)
 
 
+class FlushFileHandler(logging.FileHandler):
+    """每次写入后立即刷新的文件处理器"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
+def _get_log_dir() -> Path:
+    """获取日志目录（项目根目录下的 logs/）"""
+    # 从当前文件向上找项目根目录（通过 docker-compose.yml 或 .git 判断）
+    current = Path(__file__).resolve().parent
+    for _ in range(5):
+        if (current / "docker-compose.yml").exists() or (current / ".git").exists():
+            break
+        current = current.parent
+    log_dir = current / "logs"
+    log_dir.mkdir(exist_ok=True)
+    return log_dir
+
+
 def setup_logging(level: str = "INFO", fmt: str = "text") -> None:
     """初始化全局日志配置
 
@@ -41,17 +65,28 @@ def setup_logging(level: str = "INFO", fmt: str = "text") -> None:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-    handler = logging.StreamHandler(sys.stdout)
-
+    formatter: logging.Formatter
     if fmt == "json":
-        handler.setFormatter(JsonFormatter())
+        formatter = JsonFormatter()
     else:
-        handler.setFormatter(logging.Formatter(
+        formatter = logging.Formatter(
             fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
-        ))
+        )
 
-    root.addHandler(handler)
+    # 控制台输出
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root.addHandler(console_handler)
+
+    # 文件输出（每次写入后立即刷新）
+    log_dir = _get_log_dir()
+    log_file = log_dir / "backend.log"
+    file_handler = FlushFileHandler(
+        log_file, encoding="utf-8", mode="a", delay=False,
+    )
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
 
     # 抑制第三方库的 DEBUG 日志，只对我们自己的模块开启 DEBUG
     noisy_loggers = [

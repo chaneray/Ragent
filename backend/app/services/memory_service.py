@@ -98,7 +98,7 @@ class MemoryService:
         result = await self.db.execute(
             select(Message)
             .where(Message.session_id == session_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.id.desc())
         )
         messages = list(reversed(result.scalars().all()))
 
@@ -155,11 +155,23 @@ class MemoryService:
         # 获取已摘要的最后一条消息 ID
         last_summarized_id = session.last_summarized_message_id or 0
 
+        # 统计已摘要的消息数量（ID <= last_summarized_id）
+        if last_summarized_id > 0:
+            summarized_result = await self.db.execute(
+                select(func.count()).select_from(Message).where(
+                    Message.session_id == session_id,
+                    Message.id <= last_summarized_id,
+                )
+            )
+            summarized_count = summarized_result.scalar() or 0
+        else:
+            summarized_count = 0
+
         # 检查是否达到下一个阈值
         for threshold in SUMMARY_THRESHOLDS:
-            if msg_count >= threshold and last_summarized_id < threshold:
-                logger.info("触发增量摘要: session_id=%d, msg_count=%d, threshold=%d, last_summarized_id=%d",
-                            session_id, msg_count, threshold, last_summarized_id)
+            if msg_count >= threshold and summarized_count < threshold:
+                logger.info("触发增量摘要: session_id=%d, msg_count=%d, summarized_count=%d, threshold=%d",
+                            session_id, msg_count, summarized_count, threshold)
                 return True
 
         return False
@@ -180,7 +192,7 @@ class MemoryService:
         query = select(Message).where(
             Message.session_id == session_id,
             Message.id > last_summarized_id,
-        ).order_by(Message.created_at.asc())
+        ).order_by(Message.id.asc())
         result = await self.db.execute(query)
         messages = list(result.scalars().all())
         if not messages:
@@ -334,8 +346,8 @@ class MemoryService:
         else:
             logger.info("【L3 用户画像】无")
 
-        # Level 2: 最近的主题归纳（跨会话）
-        l2_list = await self.get_level2_memories(user_id, limit=budget["l2_count"])
+        # Level 2: 最近的主题归纳（会话级别）
+        l2_list = await self.get_level2_memories(user_id, limit=budget["l2_count"], session_id=session_id)
         if l2_list:
             l2_text = "\n".join("- %s" % m.content for m in l2_list)
             parts.append("[近期讨论主题]\n%s" % l2_text)

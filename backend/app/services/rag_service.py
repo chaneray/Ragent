@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import re
@@ -28,14 +27,6 @@ from app.services.intent_service import IntentService
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-
-async def _safe_post_update(memory_service: MemoryService, session_id: int, user_id: int) -> None:
-    """后台安全执行记忆更新，捕获所有异常避免影响主流程"""
-    try:
-        await memory_service.post_conversation_update(session_id, user_id)
-    except Exception as e:
-        logger.error("后台记忆更新失败: session_id=%d, user_id=%d, error=%s", session_id, user_id, str(e))
-
 QUERY_REWRITE_PROMPT = """你是一个查询改写助手。请将用户的口语化问题改写为 2-3 个不同表述方式，使其更适合文档检索。
 
 要求：
@@ -56,6 +47,14 @@ class RagService:
         self.milvus = MilvusClient(host=settings.MILVUS_HOST, port=settings.MILVUS_PORT)
         self.memory_service = MemoryService(db)
         self.intent_service = IntentService(self.llm)
+
+    async def _do_memory_update(self, session_id: int, user_id: int) -> None:
+        """对话结束后触发记忆更新（使用请求内的 db session）"""
+        try:
+            await self.memory_service.post_conversation_update(session_id, user_id)
+            await self.db.commit()
+        except Exception as e:
+            logger.error("记忆更新失败: session_id=%d, user_id=%d, error=%s", session_id, user_id, str(e))
 
     # ── 意图识别 ──────────────────────────────────────────────
 
@@ -89,7 +88,7 @@ class RagService:
         result = await self.db.execute(
             select(Message)
             .where(Message.session_id == session_id)
-            .order_by(Message.created_at.desc())
+            .order_by(Message.id.desc())
             .limit(limit)
         )
         messages = list(reversed(result.scalars().all()))
@@ -359,8 +358,8 @@ class RagService:
             self.db.add(Message(session_id=session_id, role="user", content=question))
             self.db.add(Message(session_id=session_id, role="assistant", content=full_answer))
             await self.db.commit()
-            # 触发记忆更新（后台异步执行，不阻塞响应）
-            asyncio.create_task(_safe_post_update(self.memory_service, session_id, user_id))
+            # 触发记忆更新（SSE 已发完，直接 await 不影响客户端）
+            await self._do_memory_update(session_id, user_id)
             return
         else:
             # knowledge_qa / summarize / compare：走检索
@@ -433,5 +432,5 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 7. 对话结束后触发记忆更新（后台异步执行，不阻塞响应）
-        asyncio.create_task(_safe_post_update(self.memory_service, session_id, user_id))
+        # 7. 对话结束后触发记忆更新（SSE 已发完，直接 await 不影响客户端）
+        await self._do_memory_update(session_id, user_id)

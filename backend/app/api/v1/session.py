@@ -93,7 +93,7 @@ async def get_session_messages(
     result = await db.execute(
         select(Message)
         .where(Message.session_id == session_id)
-        .order_by(Message.created_at)
+        .order_by(Message.id)
     )
     items = list(result.scalars().all())
     return MessageListResponse(items=items)

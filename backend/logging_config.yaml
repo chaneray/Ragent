@@ -1,0 +1,41 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  standard:
+    format: "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: standard
+    stream: ext://sys.stdout
+  file:
+    class: logging.FileHandler
+    formatter: standard
+    filename: logs/backend.log
+    encoding: utf-8
+    mode: a
+
+root:
+  level: INFO
+  handlers: [console, file]
+
+loggers:
+  app:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+  uvicorn:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+  uvicorn.access:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+  uvicorn.error:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
